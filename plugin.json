@@ -1,0 +1,21 @@
+{
+    "pluginmetadataversion": 2,
+    "name": "Kernel Driver Analysis",
+    "type": ["core", "helper"],
+    "api": ["python3"],
+    "description": "Static vulnerability analysis tools for Linux and Windows kernel drivers.",
+    "longdescription": "Collection of Binary Ninja plugins for kernel driver vulnerability research targeting both Linux and Windows. Linux: module entry detection, character device and file_operations enumeration, IOCTL discovery with full _IOC (dir/type/nr/size) decode, and vulnerability triage covering copy_from_user misuse, integer overflows in allocations, missing capability checks, mmap handler flaws, UAF patterns, GFP_KERNEL in IRQ context, and kernel pointer leaks. Windows: device name discovery, CTL_CODE IOCTL enumeration (DeviceType/Access/Function/Method), pool tag extraction, dangerous opcode detection (rdmsr/wrmsr/rdpmc), WinAPI inventory, physical memory and IO space pattern detection, and missing ProbeFor/privilege gate checks.",
+    "license": {
+        "name": "BSD-2-Clause",
+        "text": "BSD 2-Clause License\n\nCopyright (c) 2026, Whispergate\n\nRedistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:\n\n1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.\n\n2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.\n\nTHIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."
+    },
+    "platforms": ["Darwin", "Linux", "Windows"],
+    "installinstructions": {
+        "Darwin": "Copy the plugin directory into ~/Library/Application Support/Binary Ninja/plugins/",
+        "Linux": "Copy the plugin directory into ~/.binaryninja/plugins/",
+        "Windows": "Copy the plugin directory into %APPDATA%\\Binary Ninja\\plugins\\"
+    },
+    "version": "1.0.0",
+    "author": "Lavender-exe",
+    "minimumbinaryninjaversion": 3000
+}
