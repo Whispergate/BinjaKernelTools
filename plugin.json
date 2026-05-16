@@ -1,7 +1,7 @@
 {
     "pluginmetadataversion": 2,
     "name": "Kernel Driver Analysis",
-    "type": ["core", "helper"],
+    "type": ["helper"],
     "api": ["python3"],
     "description": "Static vulnerability analysis tools for Linux and Windows kernel drivers.",
     "longdescription": "Collection of Binary Ninja plugins for kernel driver vulnerability research targeting both Linux and Windows. Linux: module entry detection, character device and file_operations enumeration, IOCTL discovery with full _IOC (dir/type/nr/size) decode, and vulnerability triage covering copy_from_user misuse, integer overflows in allocations, missing capability checks, mmap handler flaws, UAF patterns, GFP_KERNEL in IRQ context, and kernel pointer leaks. Windows: device name discovery, CTL_CODE IOCTL enumeration (DeviceType/Access/Function/Method), pool tag extraction, dangerous opcode detection (rdmsr/wrmsr/rdpmc), WinAPI inventory, physical memory and IO space pattern detection, and missing ProbeFor/privilege gate checks.",
@@ -17,5 +17,5 @@
     },
     "version": "1.0.0",
     "author": "Lavender-exe",
-    "minimumbinaryninjaversion": 3000
+    "minimumbinaryninjaversion": 3164
 }
