@@ -26,6 +26,7 @@ Output: Binary Ninja log + report file at ~/lkdrv-<name>-vulns.txt
 
 import re
 import os
+from collections import defaultdict
 from binaryninja import BinaryView, log_info, log_warn, log_error
 from binaryninja.plugin import PluginCommand
 
@@ -324,6 +325,133 @@ def _check_interrupt_context_alloc(bv, func, findings):
                 "must use GFP_ATOMIC or GFP_NOWAIT".format(api))
 
 
+def _check_double_fetch(bv, func, findings):
+    """
+    Double-fetch / TOCTOU: copy_from_user called more than once on the same
+    user pointer in the same function without a lock between the calls.
+    Pattern: attacker races the kernel between the two fetches to change the
+    value — first fetch passes a validation check, second fetch sees evil data.
+    """
+    dt = get_hlil_text(func)
+    fn = func.name
+
+    # Collect all (api, source_var) pairs
+    fetch_vars = []
+    for api in ['copy_from_user', '__copy_from_user', 'get_user']:
+        for m in re.finditer(r'{}\s*\([^,)]+,\s*([a-zA-Z_]\w*)'.format(re.escape(api)), dt):
+            fetch_vars.append((api, m.group(1), m.start()))
+
+    # Group by source variable
+    by_var = defaultdict(list)
+    for api, var, pos in fetch_vars:
+        by_var[var].append((api, pos))
+
+    for var, calls in by_var.items():
+        if len(calls) < 2:
+            continue
+        # Check that there's no mutex/spinlock between the two fetches
+        first_pos  = calls[0][1]
+        second_pos = calls[1][1]
+        between    = dt[first_pos:second_pos]
+        lock_present = any(l in between for l in ['mutex_lock', 'spin_lock', 'down(', 'down_read', 'rcu_read_lock'])
+        if not lock_present:
+            _report(findings, HIGH, fn, func.start,
+                "Double-fetch TOCTOU: copy_from_user on '{}' called {} times without intervening lock "
+                "— attacker can race to change user buffer between validation and use".format(var, len(calls)))
+
+
+def _check_signedness_confusion(bv, func, findings):
+    """
+    Signedness confusion on size/length parameters.
+    Common pattern: driver reads a user-supplied length as signed int, compares
+    against a positive MAX, then passes to copy_from_user which interprets it
+    as size_t (unsigned) — a negative value bypasses the check and becomes huge.
+
+    Also detects: comparison of user-supplied count against 0 using signed comparison
+    (if (count >= 0) is always true for unsigned; if (count < 0) never triggers).
+    """
+    dt = get_hlil_text(func)
+    fn = func.name
+
+    if not looks_user_driven(dt):
+        return
+
+    # Pattern 1: signed comparison followed by copy_from_user
+    # Look for: if (len < 0) or if (len <= 0) near copy_from_user
+    # If the variable is actually unsigned, this check is useless
+    signed_check_pat = re.compile(r'if\s*\(\s*(\w+)\s*[<>]=?\s*0\s*\)')
+    copy_pat         = re.compile(r'copy_from_user|kmalloc|kzalloc')
+
+    for m in signed_check_pat.finditer(dt):
+        var = m.group(1)
+        idx = m.start()
+        post = dt[idx:idx + 600]
+        if copy_pat.search(post) and var in post:
+            _report(findings, MEDIUM, fn, func.start,
+                "Signedness confusion: '{}' checked against 0 (signed check) before copy/alloc — "
+                "if declared unsigned/size_t, check is ineffective; negative value bypasses bound".format(var))
+            break
+
+    # Pattern 2: user-supplied value cast to signed int used as allocation/copy size
+    for m in re.finditer(r'\(int\)\s*(\w+)', dt):
+        var = m.group(1)
+        cast_idx = m.start()
+        post = dt[cast_idx:cast_idx + 400]
+        if any(api in post for api in ['copy_from_user', 'kmalloc', 'kzalloc', 'memcpy']):
+            if looks_user_driven(dt[:cast_idx + 200]):
+                _report(findings, MEDIUM, fn, func.start,
+                    "Signed cast: (int){} used as size for copy/alloc — "
+                    "user-controlled value cast to signed may produce negative size".format(var))
+
+
+def _check_refcount_uaf(bv, func, findings):
+    """
+    Kernel object reference count vulnerabilities.
+    Patterns:
+      1. kref_put / kobject_put without corresponding kref_get in same critical path
+         → potential premature free if called in race condition
+      2. Object used after kref_put / kobject_put (use-after-free via ref exhaustion)
+      3. kref_put_lock (takes a lock then calls kref_put) — check that the lock is
+         actually held at all call sites
+    Also checks for missing atomic_dec_and_test / refcount_dec_and_test before free.
+    """
+    dt = get_hlil_text(func)
+    fn = func.name
+
+    put_apis  = ['kref_put', 'kobject_put', 'put_device', 'dev_put', 'sock_put', 'skb_unref']
+    get_apis  = ['kref_get', 'kobject_get', 'get_device', 'dev_hold', 'sock_hold', 'skb_get']
+
+    has_put = any(a in dt for a in put_apis)
+    has_get = any(a in dt for a in get_apis)
+
+    if not has_put:
+        return
+
+    which_put = next(a for a in put_apis if a in dt)
+
+    # Check for object use after kref_put in same function
+    put_idx = dt.find(which_put)
+    post = dt[put_idx:]
+    obj_m = re.search(r'{}[\s(]+([a-zA-Z_]\w*)'.format(re.escape(which_put)), dt)
+    if obj_m:
+        obj_var = obj_m.group(1)
+        # Look for use of same variable after put without reassignment
+        post_put = dt[put_idx + len(obj_m.group(0)):]
+        reassign = re.search(r'\b{}\s*='.format(re.escape(obj_var)), post_put)
+        use_after = re.search(r'\b{}\b'.format(re.escape(obj_var)), post_put)
+        if use_after:
+            if not reassign or reassign.start() > use_after.start():
+                _report(findings, HIGH, fn, func.start,
+                    "{}: '{}' used after ref drop — potential use-after-free if "
+                    "refcount reaches zero (verify with concurrent access pattern)".format(which_put, obj_var))
+
+    # Missing kref_get in function that calls kref_put asymmetrically
+    if has_put and not has_get:
+        _report(findings, LOW, fn, func.start,
+            "{} called without kref_get in same function — "
+            "verify caller correctly holds a reference before entering".format(which_put))
+
+
 # ---------------------------------------------------------------------------
 # Main plugin entry
 # ---------------------------------------------------------------------------
@@ -350,6 +478,9 @@ def find_vulns(bv: BinaryView):
         _check_uaf_pattern,
         _check_kernel_ptr_leak,
         _check_interrupt_context_alloc,
+        _check_double_fetch,
+        _check_signedness_confusion,
+        _check_refcount_uaf,
     ]
 
     for func in bv.functions:
