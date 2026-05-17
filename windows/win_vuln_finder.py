@@ -142,12 +142,18 @@ _DISPATCH_PATTERNS = [
     r'MajorFunction\[(?:0xe|14)\]',
     r'\+\s*0x70\b',
 ]
-_IOCTL_PATTERNS = [
+_IOCTL_PATS_HEX = [
     r'case\s+0x([0-9A-Fa-f]+)\s*:',
-    r'ioControlCode\s*==\s*0x([0-9A-Fa-f]+)',
-    r'(?:if|else\s+if)\s*\([^)]*==\s*0x([0-9A-Fa-f]+)',
-    r'\w+\s*==\s*0x([0-9A-Fa-f]+)',
+    r'ioControlCode\s*[u]?==\s*0x([0-9A-Fa-f]+)',
+    r'(?:if|else\s+if)\s*\([^)]*[u]?==\s*0x([0-9A-Fa-f]+)',
+    r'\w+\s*[u]?==\s*0x([0-9A-Fa-f]+)',
 ]
+_IOCTL_PATS_DEC = [
+    r'case\s+(\d{7,})\s*:',
+    r'(?:if|else\s+if)\s*\([^)]*[u]?==\s*(\d{7,})\b',
+    r'\w+\s*[u]?==\s*(\d{7,})\b',
+]
+_IOCTL_PATTERNS = _IOCTL_PATS_HEX  # backward-compat alias
 _NAME_HINTS = [
     'devicecontrol', 'dispatchio', 'ioctlhandler', 'ioctldispatch',
     'dispatchioctl', 'irpdevicecontrol', 'ioctlrouter',
@@ -201,15 +207,14 @@ def _find_dispatch_routines(bv):
                 if tgt and tgt.start not in seen:
                     seen.add(tgt.start)
                     routines.append(tgt)
-    # S2: name heuristic — only include if function actually contains IOCTL codes
+    # S2: name heuristic - only include if function actually contains IOCTL codes
     for func in bv.functions:
         if any(h in func.name.lower() for h in _NAME_HINTS) and func.start not in seen:
-            hlil_text = get_hlil_text(func)
-            if _find_ioctls_in_text(hlil_text):
+            if _find_ioctls(func):
                 seen.add(func.start)
                 routines.append(func)
 
-    # S3: caller of >= 2 ioctl-named functions — exclude entry points and require IOCTL codes
+    # S3: caller of >= 2 ioctl-named functions - exclude entry points and require IOCTL codes
     _ENTRY_EXCLUDE = {'driverentry', 'dllmain', 'winmain', '_start', 'driverunload'}
     callee_counts = {}
     for func in bv.functions:
@@ -221,12 +226,11 @@ def _find_dispatch_routines(bv):
         if count >= 2 and addr not in seen:
             f = bv.get_function_at(addr)
             if f and f.name.lower() not in _ENTRY_EXCLUDE:
-                hlil_text = get_hlil_text(f)
-                if _find_ioctls_in_text(hlil_text):
+                if _find_ioctls(f):
                     seen.add(addr)
                     routines.append(f)
 
-    # S4: fallback — individual ioctl-named functions
+    # S4: fallback - individual ioctl-named functions
     if not routines:
         for func in bv.functions:
             if 'ioctl' in func.name.lower() and func.start not in seen:
@@ -238,7 +242,7 @@ def _find_dispatch_routines(bv):
 def _find_ioctls_in_text(hlil_text):
     codes = set()
     normalized = re.sub(r'\s+', ' ', hlil_text)
-    for pat in _IOCTL_PATTERNS:
+    for pat in _IOCTL_PATS_HEX:
         for m in re.finditer(pat, normalized, re.IGNORECASE | re.DOTALL):
             try:
                 val = int(m.group(1), 16)
@@ -246,6 +250,52 @@ def _find_ioctls_in_text(hlil_text):
                     codes.add(val & 0xFFFFFFFF)
             except Exception:
                 pass
+    for pat in _IOCTL_PATS_DEC:
+        for m in re.finditer(pat, normalized, re.IGNORECASE | re.DOTALL):
+            try:
+                val = int(m.group(1), 10)
+                if val >= 0x200000 and _plausible_ioctl(val):
+                    codes.add(val & 0xFFFFFFFF)
+            except Exception:
+                pass
+    return sorted(codes)
+
+
+def _collect_switch_cases(instr, codes):
+    try:
+        if instr.operation.name == 'HLIL_SWITCH':
+            for case in instr.cases:
+                for v in case.values:
+                    v = int(v) & 0xFFFFFFFF
+                    if v >= 0x200000 and _plausible_ioctl(v):
+                        codes.add(v)
+        for operand in getattr(instr, 'operands', []):
+            if hasattr(operand, 'operation'):
+                _collect_switch_cases(operand, codes)
+            elif hasattr(operand, '__iter__') and not isinstance(operand, (str, bytes)):
+                for item in operand:
+                    if hasattr(item, 'operation'):
+                        _collect_switch_cases(item, codes)
+    except Exception:
+        pass
+
+
+def _find_ioctls_via_ast(func):
+    codes = set()
+    try:
+        hlil = func.hlil
+        if hlil:
+            for block in hlil:
+                for instr in block:
+                    _collect_switch_cases(instr, codes)
+    except Exception:
+        pass
+    return codes
+
+
+def _find_ioctls(func):
+    codes = _find_ioctls_via_ast(func)
+    codes |= set(_find_ioctls_in_text(get_hlil_text(func)))
     return sorted(codes)
 
 
@@ -388,8 +438,7 @@ def find_driver_vulns(bv: BinaryView):
     seen_ioctls = set()
     for df in _find_dispatch_routines(bv):
         try:
-            ct = get_hlil_text(df)
-            for code in _find_ioctls_in_text(ct):
+            for code in _find_ioctls(df):
                 key = (df.start, code)
                 if key in seen_ioctls:
                     continue

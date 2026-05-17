@@ -66,12 +66,21 @@ DISPATCH_PATTERNS = [
     r'MajorFunction\[(?:0xe|14)\]',
     r'\+\s*0x70\b',
 ]
-IOCTL_PATTERNS = [
+# hex-prefixed patterns
+_IOCTL_PATS_HEX = [
     r'case\s+0x([0-9A-Fa-f]+)\s*:',
-    r'ioControlCode\s*==\s*0x([0-9A-Fa-f]+)',
-    r'(?:if|else\s+if)\s*\([^)]*==\s*0x([0-9A-Fa-f]+)',
-    r'\w+\s*==\s*0x([0-9A-Fa-f]+)',
+    r'ioControlCode\s*[u]?==\s*0x([0-9A-Fa-f]+)',
+    r'(?:if|else\s+if)\s*\([^)]*[u]?==\s*0x([0-9A-Fa-f]+)',
+    r'\w+\s*[u]?==\s*0x([0-9A-Fa-f]+)',
 ]
+# bare decimal patterns - floor 0x200000 == 2097152 (7 digits)
+_IOCTL_PATS_DEC = [
+    r'case\s+(\d{7,})\s*:',
+    r'(?:if|else\s+if)\s*\([^)]*[u]?==\s*(\d{7,})\b',
+    r'\w+\s*[u]?==\s*(\d{7,})\b',
+]
+# keep old name as alias so win_vuln_finder copy still works independently
+IOCTL_PATTERNS = _IOCTL_PATS_HEX
 NAME_HINTS = [
     'devicecontrol', 'dispatchio', 'ioctlhandler', 'ioctldispatch',
     'dispatchioctl', 'irpdevicecontrol', 'ioctlrouter', 'ioctldispatcher',
@@ -150,8 +159,7 @@ def _find_dispatch_routines(bv: BinaryView):
     # no switch/case on IOCTL codes - filtering them prevents O(N) false-positive noise.
     for func in bv.functions:
         if any(h in func.name.lower() for h in NAME_HINTS) and func.start not in seen:
-            hlil_text = get_hlil_text(func)
-            if _find_ioctls_in_text(hlil_text):
+            if _find_ioctls(func):
                 seen.add(func.start)
                 routines.append(func)
                 log_info("[S2] Dispatch by name: {} (0x{:x})".format(func.name, func.start))
@@ -171,8 +179,7 @@ def _find_dispatch_routines(bv: BinaryView):
         if count >= 2 and addr not in seen:
             f = bv.get_function_at(addr)
             if f and f.name.lower() not in _ENTRY_EXCLUDE:
-                hlil_text = get_hlil_text(f)
-                if _find_ioctls_in_text(hlil_text):
+                if _find_ioctls(f):
                     seen.add(addr)
                     routines.append(f)
                     log_info("[S3] Dispatch (calls {} ioctl fns): {} (0x{:x})".format(
@@ -192,7 +199,7 @@ def _find_dispatch_routines(bv: BinaryView):
 def _find_ioctls_in_text(hlil_text):
     codes = set()
     normalized = re.sub(r'\s+', ' ', hlil_text)
-    for pat in IOCTL_PATTERNS:
+    for pat in _IOCTL_PATS_HEX:
         for m in re.finditer(pat, normalized, re.IGNORECASE | re.DOTALL):
             try:
                 val = int(m.group(1), 16)
@@ -200,6 +207,56 @@ def _find_ioctls_in_text(hlil_text):
                     codes.add(val & 0xFFFFFFFF)
             except Exception:
                 pass
+    for pat in _IOCTL_PATS_DEC:
+        for m in re.finditer(pat, normalized, re.IGNORECASE | re.DOTALL):
+            try:
+                val = int(m.group(1), 10)
+                if val >= 0x200000 and _plausible_ioctl(val):
+                    codes.add(val & 0xFFFFFFFF)
+            except Exception:
+                pass
+    return sorted(codes)
+
+
+def _collect_switch_cases(instr, codes):
+    """Recursively walk one HLIL instruction node, collecting switch case values."""
+    try:
+        if instr.operation.name == 'HLIL_SWITCH':
+            for case in instr.cases:
+                for v in case.values:
+                    v = int(v) & 0xFFFFFFFF
+                    if v >= 0x200000 and _plausible_ioctl(v):
+                        codes.add(v)
+        for operand in getattr(instr, 'operands', []):
+            if hasattr(operand, 'operation'):
+                _collect_switch_cases(operand, codes)
+            elif hasattr(operand, '__iter__') and not isinstance(operand, (str, bytes)):
+                for item in operand:
+                    if hasattr(item, 'operation'):
+                        _collect_switch_cases(item, codes)
+    except Exception:
+        pass
+
+
+def _find_ioctls_via_ast(func):
+    """Walk HLIL AST to extract switch case values - catches cases text scan misses."""
+    codes = set()
+    try:
+        hlil = func.hlil
+        if not hlil:
+            return codes
+        for block in hlil:
+            for instr in block:
+                _collect_switch_cases(instr, codes)
+    except Exception:
+        pass
+    return codes
+
+
+def _find_ioctls(func):
+    """Combined: AST walk (primary) + text scan (fallback). Returns sorted list."""
+    codes = _find_ioctls_via_ast(func)
+    codes |= set(_find_ioctls_in_text(get_hlil_text(func)))
     return sorted(codes)
 
 
@@ -220,8 +277,7 @@ def find_ioctls(bv: BinaryView):
 
     for func in routines:
         log_info("\n[*] Dispatch routine: {} at 0x{:x}".format(func.name, func.start))
-        hlil_text = get_hlil_text(func)
-        codes = _find_ioctls_in_text(hlil_text)
+        codes = _find_ioctls(func)
         if not codes:
             log_warn("    [-] No IOCTLs found in {}".format(func.name))
             continue
