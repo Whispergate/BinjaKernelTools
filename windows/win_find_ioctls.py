@@ -145,14 +145,22 @@ def _find_dispatch_routines(bv: BinaryView):
                     log_info("[S1] Dispatch: {} -> {} (0x{:x})".format(
                         func.name, tgt_func.name, tgt_func.start))
 
-    # S2: name heuristic
+    # S2: name heuristic - only include if the function actually contains IOCTL codes.
+    # Leaf handlers (BufferOverflowStackIoctlHandler etc.) match the name but contain
+    # no switch/case on IOCTL codes - filtering them prevents O(N) false-positive noise.
     for func in bv.functions:
         if any(h in func.name.lower() for h in NAME_HINTS) and func.start not in seen:
-            seen.add(func.start)
-            routines.append(func)
-            log_info("[S2] Dispatch by name: {} (0x{:x})".format(func.name, func.start))
+            hlil_text = get_hlil_text(func)
+            if _find_ioctls_in_text(hlil_text):
+                seen.add(func.start)
+                routines.append(func)
+                log_info("[S2] Dispatch by name: {} (0x{:x})".format(func.name, func.start))
 
-    # S3: caller of >= 2 ioctl-named functions (C++ class pattern)
+    # S3: caller of >= 2 ioctl-named functions (C++ class dispatch pattern).
+    # Exclude DriverEntry and init-style functions - they call IoctlHandlers to *register*
+    # them in MajorFunction[], not to dispatch IRPs. Also require the candidate itself
+    # contains IOCTL codes so pure setup functions don't pollute the list.
+    _ENTRY_EXCLUDE = {'driverentry', 'dllmain', 'winmain', '_start', 'driverunload'}
     callee_counts = {}
     for func in bv.functions:
         if 'ioctl' in func.name.lower():
@@ -162,15 +170,17 @@ def _find_dispatch_routines(bv: BinaryView):
     for addr, count in sorted(callee_counts.items(), key=lambda x: -x[1]):
         if count >= 2 and addr not in seen:
             f = bv.get_function_at(addr)
-            if f:
-                seen.add(addr)
-                routines.append(f)
-                log_info("[S3] Dispatch (calls {} ioctl fns): {} (0x{:x})".format(
-                    count, f.name, addr))
+            if f and f.name.lower() not in _ENTRY_EXCLUDE:
+                hlil_text = get_hlil_text(f)
+                if _find_ioctls_in_text(hlil_text):
+                    seen.add(addr)
+                    routines.append(f)
+                    log_info("[S3] Dispatch (calls {} ioctl fns): {} (0x{:x})".format(
+                        count, f.name, addr))
 
-    # S4: fallback — individual ioctl-named functions
+    # S4: fallback - individual ioctl-named functions
     if not routines:
-        log_warn("[!] No dispatcher found via S1/S2/S3 — falling back to ioctl-named functions")
+        log_warn("[!] No dispatcher found via S1/S2/S3 - falling back to ioctl-named functions")
         for func in bv.functions:
             if 'ioctl' in func.name.lower() and func.start not in seen:
                 seen.add(func.start)
@@ -220,7 +230,7 @@ def find_ioctls(bv: BinaryView):
             d = _ctl_decode(code)
             log_info("  [{:02d}] {}".format(total, _format_ioctl(code)))
             if d['method'] == 3:
-                log_info("        *** METHOD_NEITHER — no kernel buffering, raw user pointer ***")
+                log_info("        *** METHOD_NEITHER - no kernel buffering, raw user pointer ***")
 
     log_info("\n[+] Found {} valid IOCTL(s) total".format(total))
 

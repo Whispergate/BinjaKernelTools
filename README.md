@@ -29,7 +29,7 @@ Locates `init_module` / `cleanup_module` and infers driver type.
 
 - Symbol lookup (`init_module`, `cleanup_module`)
 - Section scan (`.init.text`, `.exit.text`)
-- API scoring heuristic — ranks all functions by registration API calls
+- API scoring heuristic - ranks all functions by registration API calls
 - Driver type inference: char device, misc, PCI, USB, network, platform, block, input
 
 ---
@@ -64,7 +64,7 @@ Finds classic netlink and generic netlink handlers; detects attribute validation
 
 - `netlink_kernel_create` → `.input()` callback resolution
 - `genl_register_family` → `genl_ops.doit` / `.dumpit` enumeration
-- `nla_parse()` with NULL policy — no attribute type/length enforcement
+- `nla_parse()` with NULL policy - no attribute type/length enforcement
 - Missing `nlmsg_ok()` before payload access (OOB read on truncated message)
 - `nla_get_*` on unchecked `tb[]` entries after failed / unchecked `nla_parse`
 - Missing `CAP_NET_ADMIN` / `netlink_capable()` gate in privileged handlers
@@ -98,20 +98,20 @@ Comprehensive static triage across all functions. Saves report to `~/.logs/LKDri
 | 3 | `copy_from_user` return value ignored | MEDIUM |
 | 4 | Integer overflow in `kmalloc`: `count * size` without safe arithmetic | HIGH |
 | 5 | `kmalloc` result not NULL-checked before dereference | MEDIUM |
-| 6 | `kmalloc` (not `kzalloc`) buffer passed to `copy_to_user` — info leak | HIGH |
-| 7 | `commit_creds(prepare_kernel_cred(0))` — privilege escalation primitive | HIGH |
+| 6 | `kmalloc` (not `kzalloc`) buffer passed to `copy_to_user` - info leak | HIGH |
+| 7 | `commit_creds(prepare_kernel_cred(0))` - privilege escalation primitive | HIGH |
 | 8 | Sensitive ops without `capable()` / `ns_capable()` gate | HIGH/MEDIUM |
 | 9 | `remap_pfn_range` without `vm_area` size bounds check | HIGH |
-| 10 | `vm_pgoff` in `remap_pfn_range` without validation — arbitrary pfn | HIGH |
+| 10 | `vm_pgoff` in `remap_pfn_range` without validation - arbitrary pfn | HIGH |
 | 11 | `ioremap` with user-derived size/address | HIGH |
 | 12 | `kfree` followed by potential use of freed pointer | MEDIUM |
-| 13 | `printk %p` (not `%pK`) — kernel address leak to dmesg | MEDIUM |
-| 14 | `copy_to_user(&struct, sizeof)` — padding/pointer field leak | LOW |
+| 13 | `printk %p` (not `%pK`) - kernel address leak to dmesg | MEDIUM |
+| 14 | `copy_to_user(&struct, sizeof)` - padding/pointer field leak | LOW |
 | 15 | Dangerous functions: `sprintf`, `strcpy`, `strcat`, `vsprintf` | HIGH/MEDIUM |
-| 16 | `GFP_KERNEL` inside `spin_lock_irqsave` context — must use `GFP_ATOMIC` | HIGH |
+| 16 | `GFP_KERNEL` inside `spin_lock_irqsave` context - must use `GFP_ATOMIC` | HIGH |
 | 17 | Double-fetch TOCTOU: same user pointer fetched 2+ times without lock | HIGH |
 | 18 | Signedness confusion: `(int)user_len` or signed `< 0` check before copy/alloc | MEDIUM |
-| 19 | `kref_put` / `kobject_put` followed by object use — refcount UAF | HIGH/LOW |
+| 19 | `kref_put` / `kobject_put` followed by object use - refcount UAF | HIGH/LOW |
 
 ---
 
@@ -138,7 +138,7 @@ Enumerates `IRP_MJ_DEVICE_CONTROL` dispatch routines and decodes `CTL_CODE`.
 
 - 4-strategy dispatch detection: HLIL `MajorFunction[0xe]` assignment → name heuristic → C++ class pattern → fallback
 - Full `CTL_CODE` decode: `DeviceType`, `Access`, `Function`, `Method`
-- `METHOD_NEITHER` flagged explicitly — raw user pointer, no kernel buffering
+- `METHOD_NEITHER` flagged explicitly - raw user pointer, no kernel buffering
 
 ---
 
@@ -152,8 +152,8 @@ Enumerates all 28 `IRP_MJ_*` dispatch slots and performs deep `METHOD_NEITHER` a
 - `IRP_MJ_READ` / `IRP_MJ_WRITE`: flags `UserBuffer` access without `ProbeForRead/Write`
 - **METHOD_NEITHER deep analysis:**
   - Missing `ProbeForRead` / `ProbeForWrite` on `Type3InputBuffer`
-  - Missing `__try` / `__except` — invalid pointer causes BSOD
-  - `OutputBufferLength` not validated before write-back — kernel overflow
+  - Missing `__try` / `__except` - invalid pointer causes BSOD
+  - `OutputBufferLength` not validated before write-back - kernel overflow
   - `memcpy` / `RtlCopyMemory` from `Type3InputBuffer` without probe
 
 ---
@@ -181,4 +181,4 @@ Full static triage for Windows kernel drivers. Saves report to `~/.logs/WinDrive
 
 ## License
 
-BSD 2-Clause — Copyright (c) 2026, Whispergate
+BSD 2-Clause - Copyright (c) 2026, Whispergate

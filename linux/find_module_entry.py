@@ -19,7 +19,7 @@ from binaryninja.plugin import PluginCommand
 from ..shared.helpers import get_hlil_text, get_callers
 
 # ---------------------------------------------------------------------------
-# Kernel module registration APIs — used for heuristic scoring and type detection
+# Kernel module registration APIs - used for heuristic scoring and type detection
 # ---------------------------------------------------------------------------
 
 _CHRDEV_APIS    = ['register_chrdev', 'alloc_chrdev_region', 'register_chrdev_region',

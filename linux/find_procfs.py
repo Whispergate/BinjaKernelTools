@@ -4,11 +4,11 @@ Binary Ninja plugin - Find Linux kernel procfs / sysfs / debugfs interfaces.
 These pseudo-filesystem interfaces accept user-controlled data via write/store
 callbacks and are a common source of vulnerabilities:
 
-  1. Uncapped count in write handler — copy_from_user(kbuf, user, count) where count
+  1. Uncapped count in write handler - copy_from_user(kbuf, user, count) where count
      is not bounded against kbuf size → stack/heap overflow
-  2. kmalloc(count) in write handler — user controls allocation size → integer overflow
+  2. kmalloc(count) in write handler - user controls allocation size → integer overflow
      or allocation of a huge buffer
-  3. Missing kstrtol/kstrtoul return value check — subsequent logic uses garbage value
+  3. Missing kstrtol/kstrtoul return value check - subsequent logic uses garbage value
   4. Sysfs .store() trusting count without PAGE_SIZE cap
   5. debugfs handlers with missing access_ok / capability check
   6. Uninitialized stack var passed to seq_show/seq_printf → info leak
@@ -104,10 +104,10 @@ def _check_write_handler(bv, func, source_label):
     if 'copy_from_user' in dt or '__copy_from_user' in dt:
         idx = dt.find('copy_from_user')
         if not nearby_has_check(dt, idx, _SAFE_SIZE_CHECKS, window=400):
-            issues.append("HIGH: copy_from_user — count not bounded (stack/heap overflow if kbuf is fixed-size)")
+            issues.append("HIGH: copy_from_user - count not bounded (stack/heap overflow if kbuf is fixed-size)")
 
     # Issue 2: kmalloc(count) where count = third parameter of write handler
-    # write(file*, user_buf, count, loff_t*) — count is arg2
+    # write(file*, user_buf, count, loff_t*) - count is arg2
     for api in ['kmalloc', 'kzalloc', '__kmalloc']:
         if api not in dt:
             continue
@@ -117,7 +117,7 @@ def _check_write_handler(bv, func, source_label):
         if re.search(r'{}[\s(]+(?:arg2|count|len|size)\b'.format(re.escape(api)), alloc_window) or \
            re.search(r'{}[\s(]+\w+\s*[+\-\*]'.format(re.escape(api)), alloc_window):
             if not nearby_has_check(dt, idx, _SAFE_SIZE_CHECKS, window=300):
-                issues.append("HIGH: {} — allocation may be sized from raw user count without bounds check".format(api))
+                issues.append("HIGH: {} - allocation may be sized from raw user count without bounds check".format(api))
 
     # Issue 3: kstrto* return value not checked
     for api in _KSTR_APIS:
@@ -127,13 +127,13 @@ def _check_write_handler(bv, func, source_label):
             line = m.group(1)
             if not re.search(r'\w+\s*=\s*' + re.escape(api), line) and \
                not re.search(r'if\s*\(' + re.escape(api), line):
-                issues.append("MEDIUM: {} return value not checked — subsequent logic may use stale value".format(api))
+                issues.append("MEDIUM: {} return value not checked - subsequent logic may use stale value".format(api))
                 break
 
     # Issue 4: missing capability check for privileged write
     has_cap = 'capable(' in dt or 'ns_capable(' in dt
     if not has_cap:
-        issues.append("INFO: No capability check — any user with write permission can trigger handler")
+        issues.append("INFO: No capability check - any user with write permission can trigger handler")
 
     # Issue 5: PAGE_SIZE not used as cap in sysfs .store (max count is PAGE_SIZE in sysfs)
     is_sysfs_store = 'store' in fn.lower() or 'sysfs' in source_label.lower()
@@ -141,11 +141,11 @@ def _check_write_handler(bv, func, source_label):
         issues.append("MEDIUM: sysfs .store() does not cap count at PAGE_SIZE")
 
     if issues:
-        log_info("\n  [Write handler] {} (0x{:x}) — from {}".format(fn, func.start, source_label))
+        log_info("\n  [Write handler] {} (0x{:x}) - from {}".format(fn, func.start, source_label))
         for issue in issues:
             log_info("    [!] {}".format(issue))
     else:
-        log_info("  [Write handler] {} (0x{:x}) — no obvious issues".format(fn, func.start))
+        log_info("  [Write handler] {} (0x{:x}) - no obvious issues".format(fn, func.start))
 
 
 def _check_show_handler(bv, func, source_label):
@@ -157,12 +157,12 @@ def _check_show_handler(bv, func, source_label):
     # seq_printf with %p or user-controlled format string
     if 'seq_printf' in dt or 'seq_puts' in dt:
         if re.search(r'seq_printf\s*\([^,]+,\s*\w+\s*[^"]\)', dt):
-            issues.append("MEDIUM: seq_printf with non-literal format string — potential format string injection")
+            issues.append("MEDIUM: seq_printf with non-literal format string - potential format string injection")
         if re.search(r'%p[^KkS]', dt):
-            issues.append("MEDIUM: seq_printf with %%p — leaks kernel virtual address to unprivileged reader")
+            issues.append("MEDIUM: seq_printf with %%p - leaks kernel virtual address to unprivileged reader")
 
     if issues:
-        log_info("\n  [Show handler] {} (0x{:x}) — from {}".format(fn, func.start, source_label))
+        log_info("\n  [Show handler] {} (0x{:x}) - from {}".format(fn, func.start, source_label))
         for issue in issues:
             log_info("    [!] {}".format(issue))
 
@@ -176,7 +176,7 @@ def _scan_proc_create(bv):
     for api in _PROC_APIS:
         for func, ref_addr in get_callers(bv, api):
             log_info("[*] {} in {} at 0x{:x}".format(api, func.name, ref_addr))
-            # proc_create(name, mode, parent, fops) — fops is arg3
+            # proc_create(name, mode, parent, fops) - fops is arg3
             write_fn = _resolve_fops_from_call(bv, func, ref_addr, 3)
             if write_fn:
                 log_info("  [+] Resolved write handler: {} (0x{:x})".format(write_fn.name, write_fn.start))
@@ -210,7 +210,7 @@ def _scan_by_name(bv):
         fn_lower = func.name.lower()
         if any(hint in fn_lower for hint in _WRITE_NAME_HINTS):
             dt = get_hlil_text(func)
-            # Confirm this actually copies from user — otherwise not a user-driven handler
+            # Confirm this actually copies from user - otherwise not a user-driven handler
             if looks_user_driven(dt):
                 _check_write_handler(bv, func, "name heuristic")
         elif any(hint in fn_lower for hint in _SHOW_NAME_HINTS):

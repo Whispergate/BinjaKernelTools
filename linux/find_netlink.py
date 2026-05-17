@@ -5,20 +5,20 @@ Netlink is a high-value attack surface: many drivers expose sockets for user-ker
 IPC with weaker validation discipline than syscall paths.
 
 Vulnerability classes unique to netlink:
-  1. Missing nlmsg_ok() before payload access — OOB read on truncated message
-  2. nla_parse() / nla_parse_nested() with NULL policy — no attr type/length validation
+  1. Missing nlmsg_ok() before payload access - OOB read on truncated message
+  2. nla_parse() / nla_parse_nested() with NULL policy - no attr type/length validation
   3. Attribute accessed (nla_get_*) without prior validation in nla_policy table
   4. Missing capability check (CAP_NET_ADMIN / CAP_SYS_ADMIN) in privileged handler
   5. nlmsg_len field trusted directly for pointer arithmetic without bounds check
   6. nla_data() result dereferenced without length check after nla_parse NULL-policy
-  7. Missing error return check on nla_parse — stale/NULL tb[] entries used
+  7. Missing error return check on nla_parse - stale/NULL tb[] entries used
 
 Detection targets:
-  S1: netlink_kernel_create — classic netlink; locate input() callback
-  S2: genl_register_family / __genl_register_family — generic netlink family reg
-  S3: genl_ops / genl_small_ops — find .doit / .dumpit handler functions
-  S4: nla_parse / nla_parse_nested callers — flag NULL policy argument
-  S5: nlmsg_hdr() callers — check for missing nlmsg_ok() near each call site
+  S1: netlink_kernel_create - classic netlink; locate input() callback
+  S2: genl_register_family / __genl_register_family - generic netlink family reg
+  S3: genl_ops / genl_small_ops - find .doit / .dumpit handler functions
+  S4: nla_parse / nla_parse_nested callers - flag NULL policy argument
+  S5: nlmsg_hdr() callers - check for missing nlmsg_ok() near each call site
 """
 
 import re
@@ -39,7 +39,7 @@ _NLA_PARSE_APIS   = ['nla_parse', 'nla_parse_nested', 'nla_parse_nested_deprecat
 _CAPABILITY_APIS  = ['capable(', 'ns_capable(', 'netlink_capable(', 'netlink_net_capable(']
 _NLMSG_VALIDATE   = ['nlmsg_ok', 'nlmsg_len', 'nlmsg_validate']
 
-# Attribute accessor functions — all assume the attribute was validated by policy
+# Attribute accessor functions - all assume the attribute was validated by policy
 _NLA_GET_APIS = [
     'nla_get_u8', 'nla_get_u16', 'nla_get_u32', 'nla_get_u64',
     'nla_get_s8', 'nla_get_s16', 'nla_get_s32', 'nla_get_s64',
@@ -58,7 +58,7 @@ def _has_capability_check(dt):
 
 def _null_policy_nla_parse(hlil_text):
     """
-    Detect nla_parse(..., NULL, NULL) — sixth and seventh args both NULL
+    Detect nla_parse(..., NULL, NULL) - sixth and seventh args both NULL
     meaning no policy validation and no extack error reporting.
     HLIL renders this as: nla_parse(..., 0, 0) or nla_parse(..., NULL, NULL)
     """
@@ -111,17 +111,17 @@ def _analyze_handler(bv, handler_func, source_label):
     # Check 1: missing nlmsg_ok / nlmsg_validate before payload access
     accesses_payload = 'nlmsg_data' in dt or 'nlmsg_hdr' in dt or 'genlmsg_data' in dt
     if accesses_payload and not any(v in dt for v in _NLMSG_VALIDATE):
-        issues.append("MISSING nlmsg_ok() — payload accessed without message length validation")
+        issues.append("MISSING nlmsg_ok() - payload accessed without message length validation")
 
     # Check 2: nla_parse with NULL policy
     if _null_policy_nla_parse(dt):
-        issues.append("nla_parse() with NULL policy — no attribute type/length enforcement")
+        issues.append("nla_parse() with NULL policy - no attribute type/length enforcement")
 
     # Check 3: nla_get_* used but nla_parse result not checked
     uses_nla_get = any(a in dt for a in _NLA_GET_APIS)
     if uses_nla_get and 'nla_parse' in dt:
         if 'if (' not in dt[dt.find('nla_parse'):dt.find('nla_parse') + 300]:
-            issues.append("nla_parse return value unchecked — tb[] entries may be NULL before nla_get_*")
+            issues.append("nla_parse return value unchecked - tb[] entries may be NULL before nla_get_*")
 
     # Check 4: missing capability check
     if not _has_capability_check(dt):
@@ -132,14 +132,14 @@ def _analyze_handler(bv, handler_func, source_label):
         idx = dt.find('memcpy')
         nearby = dt[max(0, idx - 200):idx + 200]
         if 'nlmsg_len' in nearby or 'nla_len' in nearby:
-            issues.append("memcpy sized by nlmsg_len/nla_len — verify length validated before copy")
+            issues.append("memcpy sized by nlmsg_len/nla_len - verify length validated before copy")
 
     if issues:
-        log_info("\n  Handler: {} (0x{:x}) — from {}".format(fn, handler_func.start, source_label))
+        log_info("\n  Handler: {} (0x{:x}) - from {}".format(fn, handler_func.start, source_label))
         for issue in issues:
             log_info("    [!] {}".format(issue))
     else:
-        log_info("  Handler: {} (0x{:x}) — no obvious issues".format(fn, handler_func.start))
+        log_info("  Handler: {} (0x{:x}) - no obvious issues".format(fn, handler_func.start))
 
 
 def _find_classic_netlink(bv):
@@ -185,14 +185,14 @@ def _find_nla_parse_callers(bv):
         for func, ref_addr in get_callers(bv, api):
             dt = get_hlil_text(func)
             if _null_policy_nla_parse(dt):
-                log_info("[!!!] HIGH: {} in {} at 0x{:x} — NULL nla_policy, no attribute validation".format(
+                log_info("[!!!] HIGH: {} in {} at 0x{:x} - NULL nla_policy, no attribute validation".format(
                     api, func.name, ref_addr))
             # Also check nla_get_* used after a potentially-NULL tb[] entry
             if any(a in dt for a in _NLA_GET_APIS):
                 idx = dt.find(api)
                 post = dt[idx:idx + 500]
                 if not re.search(r'if\s*\(.*tb\[', post) and not re.search(r'tb\[.*\]\s*!=', post):
-                    log_info("[!]  MEDIUM: {} caller {} — tb[] entries not NULL-checked before nla_get_*".format(
+                    log_info("[!]  MEDIUM: {} caller {} - tb[] entries not NULL-checked before nla_get_*".format(
                         api, func.name))
 
 
@@ -201,7 +201,7 @@ def _find_nlmsg_hdr_callers(bv):
     for func, ref_addr in get_callers(bv, 'nlmsg_hdr'):
         dt = get_hlil_text(func)
         if not any(v in dt for v in _NLMSG_VALIDATE):
-            log_info("[!!!] HIGH: {} (0x{:x}) — nlmsg_hdr() used without nlmsg_ok() validation".format(
+            log_info("[!!!] HIGH: {} (0x{:x}) - nlmsg_hdr() used without nlmsg_ok() validation".format(
                 func.name, func.start))
 
 

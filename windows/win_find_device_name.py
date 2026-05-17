@@ -29,7 +29,7 @@ def _is_device_name(s):
 
 
 def find_device_names(bv: BinaryView):
-    log_info("[+] Windows driver — scanning for device names: {}".format(bv.file.filename))
+    log_info("[+] Windows driver - scanning for device names: {}".format(bv.file.filename))
     found_any = False
 
     # Pass 1: all defined strings
@@ -55,7 +55,7 @@ def find_device_names(bv: BinaryView):
                     found_any = True
 
     if not found_any:
-        log_warn("[!] No device names found — may be dynamically constructed or obfuscated.")
+        log_warn("[!] No device names found - may be dynamically constructed or obfuscated.")
     log_info("[+] Scan complete.")
 
 

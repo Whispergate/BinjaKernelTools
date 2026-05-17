@@ -98,12 +98,12 @@ def _check_copy_from_user(bv, func, findings):
         if api == '__copy_from_user':
             if 'access_ok' not in dt[:idx + 400]:
                 _report(findings, HIGH, fn, func.start,
-                    "{} used without prior access_ok() — kernel may access arbitrary user VA".format(api))
+                    "{} used without prior access_ok() - kernel may access arbitrary user VA".format(api))
 
         if looks_user_driven(dt):
             if not nearby_has_check(dt, idx, ['if (', 'if(!', 'WARN', 'BUG', '> ', '< ', '<= ', '>= '], window=300):
                 _report(findings, HIGH, fn, func.start,
-                    "{} — size appears user-derived without bounds validation (buffer overflow risk)".format(api))
+                    "{} - size appears user-derived without bounds validation (buffer overflow risk)".format(api))
 
         # Check for return value being ignored: pattern is call result not stored
         call_line_match = re.search(r'([^\n]*' + re.escape(api) + r'[^\n]*)', dt)
@@ -112,7 +112,7 @@ def _check_copy_from_user(bv, func, findings):
             if not re.search(r'\w+\s*=\s*' + re.escape(api), line) and \
                not re.search(r'if\s*\(' + re.escape(api), line):
                 _report(findings, MEDIUM, fn, func.start,
-                    "{} return value not checked — partial copy may silently proceed".format(api))
+                    "{} return value not checked - partial copy may silently proceed".format(api))
 
 
 def _check_kmalloc_overflow(bv, func, findings):
@@ -135,7 +135,7 @@ def _check_kmalloc_overflow(bv, func, findings):
         if '*' in window and looks_user_driven(dt):
             if not any(s in window for s in safe_arith):
                 _report(findings, HIGH, fn, func.start,
-                    "{} — allocation size may involve integer overflow: "
+                    "{} - allocation size may involve integer overflow: "
                     "user-controlled count * elem without overflow-safe arithmetic".format(api))
 
         # NULL check after allocation
@@ -148,7 +148,7 @@ def _check_kmalloc_overflow(bv, func, findings):
 
 def _check_uninitialized_copy_to_user(bv, func, findings):
     """
-    Uninitialized kmalloc'd / stack buffer passed to copy_to_user — kernel info leak.
+    Uninitialized kmalloc'd / stack buffer passed to copy_to_user - kernel info leak.
     Heuristic: kmalloc (not kzalloc) followed by copy_to_user without memset/kzalloc.
     """
     dt = get_hlil_text(func)
@@ -162,7 +162,7 @@ def _check_uninitialized_copy_to_user(bv, func, findings):
         if 'kmalloc' in pre and 'kzalloc' not in pre:
             if 'memset' not in pre and 'memzero' not in pre and 'RtlZeroMemory' not in pre:
                 _report(findings, HIGH, fn, func.start,
-                    "{} — kmalloc'd buffer sent to user without zeroing: "
+                    "{} - kmalloc'd buffer sent to user without zeroing: "
                     "uninitialized bytes may leak kernel heap content".format(copy_api))
 
 
@@ -177,16 +177,16 @@ def _check_dangerous_functions(bv, func, findings):
         idx = dt.find(api)
         sev = HIGH if looks_user_driven(dt) else MEDIUM
         _report(findings, sev, fn, func.start,
-            "{} — unsafe string/format function; no bounds on output buffer".format(api))
+            "{} - unsafe string/format function; no bounds on output buffer".format(api))
 
 
 def _check_privesc_pattern(bv, func, findings):
-    """commit_creds(prepare_kernel_cred(0)) — classic LPE primitive."""
+    """commit_creds(prepare_kernel_cred(0)) - classic LPE primitive."""
     dt = get_hlil_text(func)
     fn = func.name
     if 'commit_creds' in dt and 'prepare_kernel_cred' in dt:
         _report(findings, HIGH, fn, func.start,
-            "commit_creds(prepare_kernel_cred(0)) pattern — potential privilege escalation primitive")
+            "commit_creds(prepare_kernel_cred(0)) pattern - potential privilege escalation primitive")
 
 
 def _check_missing_capability(bv, func, findings):
@@ -225,7 +225,7 @@ def _check_mmap_handler(bv, func, findings):
         size_checks = ['vm_end', 'vm_start', '<= ', '> ', 'PAGE_SIZE', 'device_size', 'map_size']
         if not nearby_has_check(dt, idx, size_checks, window=400):
             _report(findings, HIGH, fn, func.start,
-                "{} — no vma size bounds check detected: "
+                "{} - no vma size bounds check detected: "
                 "user controls mapping size, may expose physical memory beyond device region".format(api))
 
     if 'vma->vm_pgoff' in dt or 'vm_pgoff' in dt:
@@ -233,7 +233,7 @@ def _check_mmap_handler(bv, func, findings):
             pgoff_checks = ['<= ', '>= ', 'if (', 'PAGE_ALIGN', 'max_pfn']
             if not nearby_has_check(dt, dt.find('vm_pgoff'), pgoff_checks):
                 _report(findings, HIGH, fn, func.start,
-                    "vm_pgoff used in remap_pfn_range without validation — "
+                    "vm_pgoff used in remap_pfn_range without validation - "
                     "user-controlled pfn can map arbitrary physical pages")
 
 
@@ -249,7 +249,7 @@ def _check_ioremap_user_size(bv, func, findings):
             idx = dt.find(api)
             if not nearby_has_validation(dt, idx):
                 _report(findings, HIGH, fn, func.start,
-                    "{} — physical address or size may be user-derived without validation".format(api))
+                    "{} - physical address or size may be user-derived without validation".format(api))
 
 
 def _check_uaf_pattern(bv, func, findings):
@@ -274,13 +274,13 @@ def _check_uaf_pattern(bv, func, findings):
             if use_m:
                 if not assign_m or assign_m.start() > use_m.start():
                     _report(findings, MEDIUM, fn, func.start,
-                        "{}: '{}' potentially used after free (UAF heuristic — verify manually)".format(
+                        "{}: '{}' potentially used after free (UAF heuristic - verify manually)".format(
                             api, var))
 
 
 def _check_kernel_ptr_leak(bv, func, findings):
     """
-    printk with %p (not %pK) — leaks kernel virtual addresses pre-kptr_restrict.
+    printk with %p (not %pK) - leaks kernel virtual addresses pre-kptr_restrict.
     Also flags copy_to_user of structs that likely contain kernel pointers.
     """
     dt = get_hlil_text(func)
@@ -289,21 +289,21 @@ def _check_kernel_ptr_leak(bv, func, findings):
     if 'printk' in dt or 'pr_info' in dt or 'pr_debug' in dt or 'dev_info' in dt:
         for m in re.finditer(r'"%[^"]*%p[^Kk]', dt):
             _report(findings, MEDIUM, fn, func.start,
-                "printk with %%p (not %%pK/%%pX) — leaks kernel virtual address to dmesg")
+                "printk with %%p (not %%pK/%%pX) - leaks kernel virtual address to dmesg")
 
     # copy_to_user of a raw struct that might contain pointers
     if 'copy_to_user' in dt:
         for m in re.finditer(r'copy_to_user\s*\([^,]+,\s*&?(\w+)\s*,\s*sizeof\b', dt):
             struct_var = m.group(1)
             _report(findings, LOW, fn, func.start,
-                "copy_to_user(&{}, sizeof) — ensure struct has no kernel pointer fields "
+                "copy_to_user(&{}, sizeof) - ensure struct has no kernel pointer fields "
                 "and is fully initialized (info leak risk)".format(struct_var))
 
 
 def _check_interrupt_context_alloc(bv, func, findings):
     """
     GFP_KERNEL (0xcc0 / 0x6000) in a function that also uses spin_lock_irqsave /
-    in_interrupt context — must use GFP_ATOMIC instead.
+    in_interrupt context - must use GFP_ATOMIC instead.
     """
     dt = get_hlil_text(func)
     fn = func.name
@@ -321,7 +321,7 @@ def _check_interrupt_context_alloc(bv, func, findings):
         window = dt[idx: min(len(dt), idx + 200)]
         if any(lit in window for lit in gfp_kernel_lits):
             _report(findings, HIGH, fn, func.start,
-                "{} with GFP_KERNEL inside interrupt-context (spin_lock_irqsave) — "
+                "{} with GFP_KERNEL inside interrupt-context (spin_lock_irqsave) - "
                 "must use GFP_ATOMIC or GFP_NOWAIT".format(api))
 
 
@@ -330,7 +330,7 @@ def _check_double_fetch(bv, func, findings):
     Double-fetch / TOCTOU: copy_from_user called more than once on the same
     user pointer in the same function without a lock between the calls.
     Pattern: attacker races the kernel between the two fetches to change the
-    value — first fetch passes a validation check, second fetch sees evil data.
+    value - first fetch passes a validation check, second fetch sees evil data.
     """
     dt = get_hlil_text(func)
     fn = func.name
@@ -357,7 +357,7 @@ def _check_double_fetch(bv, func, findings):
         if not lock_present:
             _report(findings, HIGH, fn, func.start,
                 "Double-fetch TOCTOU: copy_from_user on '{}' called {} times without intervening lock "
-                "— attacker can race to change user buffer between validation and use".format(var, len(calls)))
+                "- attacker can race to change user buffer between validation and use".format(var, len(calls)))
 
 
 def _check_signedness_confusion(bv, func, findings):
@@ -365,7 +365,7 @@ def _check_signedness_confusion(bv, func, findings):
     Signedness confusion on size/length parameters.
     Common pattern: driver reads a user-supplied length as signed int, compares
     against a positive MAX, then passes to copy_from_user which interprets it
-    as size_t (unsigned) — a negative value bypasses the check and becomes huge.
+    as size_t (unsigned) - a negative value bypasses the check and becomes huge.
 
     Also detects: comparison of user-supplied count against 0 using signed comparison
     (if (count >= 0) is always true for unsigned; if (count < 0) never triggers).
@@ -388,7 +388,7 @@ def _check_signedness_confusion(bv, func, findings):
         post = dt[idx:idx + 600]
         if copy_pat.search(post) and var in post:
             _report(findings, MEDIUM, fn, func.start,
-                "Signedness confusion: '{}' checked against 0 (signed check) before copy/alloc — "
+                "Signedness confusion: '{}' checked against 0 (signed check) before copy/alloc - "
                 "if declared unsigned/size_t, check is ineffective; negative value bypasses bound".format(var))
             break
 
@@ -400,7 +400,7 @@ def _check_signedness_confusion(bv, func, findings):
         if any(api in post for api in ['copy_from_user', 'kmalloc', 'kzalloc', 'memcpy']):
             if looks_user_driven(dt[:cast_idx + 200]):
                 _report(findings, MEDIUM, fn, func.start,
-                    "Signed cast: (int){} used as size for copy/alloc — "
+                    "Signed cast: (int){} used as size for copy/alloc - "
                     "user-controlled value cast to signed may produce negative size".format(var))
 
 
@@ -411,7 +411,7 @@ def _check_refcount_uaf(bv, func, findings):
       1. kref_put / kobject_put without corresponding kref_get in same critical path
          → potential premature free if called in race condition
       2. Object used after kref_put / kobject_put (use-after-free via ref exhaustion)
-      3. kref_put_lock (takes a lock then calls kref_put) — check that the lock is
+      3. kref_put_lock (takes a lock then calls kref_put) - check that the lock is
          actually held at all call sites
     Also checks for missing atomic_dec_and_test / refcount_dec_and_test before free.
     """
@@ -442,13 +442,13 @@ def _check_refcount_uaf(bv, func, findings):
         if use_after:
             if not reassign or reassign.start() > use_after.start():
                 _report(findings, HIGH, fn, func.start,
-                    "{}: '{}' used after ref drop — potential use-after-free if "
+                    "{}: '{}' used after ref drop - potential use-after-free if "
                     "refcount reaches zero (verify with concurrent access pattern)".format(which_put, obj_var))
 
     # Missing kref_get in function that calls kref_put asymmetrically
     if has_put and not has_get:
         _report(findings, LOW, fn, func.start,
-            "{} called without kref_get in same function — "
+            "{} called without kref_get in same function - "
             "verify caller correctly holds a reference before entering".format(which_put))
 
 

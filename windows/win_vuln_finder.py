@@ -8,7 +8,7 @@ Surfaces:
   - Dangerous opcodes: rdpmc / rdmsr / wrmsr
   - Dangerous C functions: sprintf / memcpy / memmove / RtlCopyMemory / strcat / strcpy
   - Windows kernel API inventory (Mm*, Zw*, Io*, Flt*, ProbeFor*, Rtl*, Ob*)
-  - IOCTL enumeration (dispatch routine heuristic — see win_find_ioctls.py)
+  - IOCTL enumeration (dispatch routine heuristic - see win_find_ioctls.py)
   - Physical memory / IO space: MmMapIoSpace, MmCopyMemory, ZwOpenSection, etc.
   - General vuln patterns:
       * Uninstrumented copies: memcpy/RtlCopyMemory near user buffer without ProbeFor
@@ -201,10 +201,32 @@ def _find_dispatch_routines(bv):
                 if tgt and tgt.start not in seen:
                     seen.add(tgt.start)
                     routines.append(tgt)
+    # S2: name heuristic — only include if function actually contains IOCTL codes
     for func in bv.functions:
         if any(h in func.name.lower() for h in _NAME_HINTS) and func.start not in seen:
-            seen.add(func.start)
-            routines.append(func)
+            hlil_text = get_hlil_text(func)
+            if _find_ioctls_in_text(hlil_text):
+                seen.add(func.start)
+                routines.append(func)
+
+    # S3: caller of >= 2 ioctl-named functions — exclude entry points and require IOCTL codes
+    _ENTRY_EXCLUDE = {'driverentry', 'dllmain', 'winmain', '_start', 'driverunload'}
+    callee_counts = {}
+    for func in bv.functions:
+        if 'ioctl' in func.name.lower():
+            for ref in bv.get_code_refs(func.start):
+                if ref.function:
+                    callee_counts[ref.function.start] = callee_counts.get(ref.function.start, 0) + 1
+    for addr, count in sorted(callee_counts.items(), key=lambda x: -x[1]):
+        if count >= 2 and addr not in seen:
+            f = bv.get_function_at(addr)
+            if f and f.name.lower() not in _ENTRY_EXCLUDE:
+                hlil_text = get_hlil_text(f)
+                if _find_ioctls_in_text(hlil_text):
+                    seen.add(addr)
+                    routines.append(f)
+
+    # S4: fallback — individual ioctl-named functions
     if not routines:
         for func in bv.functions:
             if 'ioctl' in func.name.lower() and func.start not in seen:
@@ -305,7 +327,7 @@ def find_driver_vulns(bv: BinaryView):
     emit("[>] Pool tags...")
     pooltags = _collect_pooltags(bv)
     for tag in sorted(pooltags):
-        emit("    {} — called by: {}".format(tag, ', '.join(sorted(pooltags[tag]))))
+        emit("    {} - called by: {}".format(tag, ', '.join(sorted(pooltags[tag]))))
     if not pooltags:
         emit("    (none)")
 
@@ -376,7 +398,7 @@ def find_driver_vulns(bv: BinaryView):
                 ioctl_rows.append(row)
                 d = _ctl_decode(code)
                 if d['method'] == 3:
-                    ioctl_rows.append("  *** METHOD_NEITHER — raw user pointer, high risk ***")
+                    ioctl_rows.append("  *** METHOD_NEITHER - raw user pointer, high risk ***")
         except Exception:
             pass
     for r in sorted(set(ioctl_rows)):
@@ -408,7 +430,7 @@ def find_driver_vulns(bv: BinaryView):
                 idx = dt.find(api)
                 risky = _looks_user_driven_win(dt) and not nearby_has_check(dt, idx, ['ProbeFor'])
                 sev = 'HIGH' if (in_ioctl and risky) else ('MEDIUM' if in_ioctl else 'LOW')
-                emit("[{}] IO space mapping in {} :: {} — verify PA/size origin".format(
+                emit("[{}] IO space mapping in {} :: {} - verify PA/size origin".format(
                     sev, func.name, api))
 
         if 'MmMapLockedPagesSpecifyCache' in dt:
@@ -421,7 +443,7 @@ def find_driver_vulns(bv: BinaryView):
         if in_ioctl:
             for prefix in ('READ_PORT_', 'WRITE_PORT_', 'READ_REGISTER_', 'WRITE_REGISTER_'):
                 if prefix in dt:
-                    emit("[HIGH] Port/Register IO from IOCTL in {} :: {} — verify privilege".format(
+                    emit("[HIGH] Port/Register IO from IOCTL in {} :: {} - verify privilege".format(
                         func.name, prefix))
 
     # ---- General vuln heuristics ----

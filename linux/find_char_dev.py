@@ -128,7 +128,7 @@ def _report_fops(bv, fops_addr, source_label):
     log_info("  [fops @ 0x{:x}]  from: {}".format(fops_addr, source_label))
     fields = _resolve_fops(bv, fops_addr)
     if not fields:
-        log_warn("    (no function pointers resolved — may be wrong offset or stripped)")
+        log_warn("    (no function pointers resolved - may be wrong offset or stripped)")
         return
     for off, name, ptr, func in fields:
         fname = func.name if func else "???"
@@ -146,7 +146,7 @@ def find_char_devices(bv: BinaryView):
     found_any = False
 
     # -----------------------------------------------------------------------
-    # register_chrdev(major, name, fops)  — fops is arg[2]
+    # register_chrdev(major, name, fops)  - fops is arg[2]
     # -----------------------------------------------------------------------
     for func, ref_addr in get_callers(bv, 'register_chrdev') + get_callers(bv, '__register_chrdev'):
         log_info("\n[*] register_chrdev called in {} at 0x{:x}".format(func.name, ref_addr))
@@ -158,7 +158,7 @@ def find_char_devices(bv: BinaryView):
             log_warn("    Could not statically resolve fops pointer (may be runtime-computed)")
 
     # -----------------------------------------------------------------------
-    # cdev_init(cdev, fops)  — fops is arg[1]
+    # cdev_init(cdev, fops)  - fops is arg[1]
     # -----------------------------------------------------------------------
     for func, ref_addr in get_callers(bv, 'cdev_init'):
         log_info("\n[*] cdev_init called in {} at 0x{:x}".format(func.name, ref_addr))
@@ -170,13 +170,13 @@ def find_char_devices(bv: BinaryView):
             log_warn("    Could not statically resolve fops pointer")
 
     # -----------------------------------------------------------------------
-    # alloc_chrdev_region — device name + major; fops set separately via cdev_init
+    # alloc_chrdev_region - device name + major; fops set separately via cdev_init
     # -----------------------------------------------------------------------
     for func, ref_addr in get_callers(bv, 'alloc_chrdev_region') + get_callers(bv, 'register_chrdev_region'):
         log_info("\n[*] alloc_chrdev_region called in {} at 0x{:x}".format(func.name, ref_addr))
 
     # -----------------------------------------------------------------------
-    # misc_register(miscdevice*)  — miscdevice.fops is at +0x10 from struct base
+    # misc_register(miscdevice*)  - miscdevice.fops is at +0x10 from struct base
     # -----------------------------------------------------------------------
     for func, ref_addr in get_callers(bv, 'misc_register'):
         log_info("\n[*] misc_register called in {} at 0x{:x}".format(func.name, ref_addr))

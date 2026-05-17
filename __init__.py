@@ -1,4 +1,4 @@
-# Kernel Driver Analysis — Binary Ninja plugin package
+# Kernel Driver Analysis - Binary Ninja plugin package
 # Commands registered under:
 #   "Linux Driver Analysis\..."
 #   "Windows Driver Analysis\..."

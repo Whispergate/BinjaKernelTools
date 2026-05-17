@@ -4,7 +4,7 @@ and METHOD_NEITHER deep analysis.
 
 Enumerates all 28 IRP_MJ_* dispatch handlers from DRIVER_OBJECT.MajorFunction[],
 assesses each handler's security relevance, and performs deep analysis on
-METHOD_NEITHER IOCTL handlers — the highest-risk transfer method because the
+METHOD_NEITHER IOCTL handlers - the highest-risk transfer method because the
 driver receives a raw unvalidated user-space pointer with no kernel buffering.
 
 DRIVER_OBJECT.MajorFunction[] layout (x86_64, offset from object base):
@@ -38,8 +38,8 @@ IRP_MJ = {
     0x00: ('IRP_MJ_CREATE',                   'MEDIUM', 'File/device open; check SecurityContext, access mask handling'),
     0x01: ('IRP_MJ_CREATE_NAMED_PIPE',         'HIGH',   'Named pipe creation; check pipe attributes for arbitrary pipe creation'),
     0x02: ('IRP_MJ_CLOSE',                     'LOW',    'Close; cleanup only; low risk unless object state corrupted'),
-    0x03: ('IRP_MJ_READ',                      'HIGH',   'Read from device; UserBuffer / SystemBuffer — check METHOD'),
-    0x04: ('IRP_MJ_WRITE',                     'HIGH',   'Write to device; UserBuffer / SystemBuffer — check METHOD'),
+    0x03: ('IRP_MJ_READ',                      'HIGH',   'Read from device; UserBuffer / SystemBuffer - check METHOD'),
+    0x04: ('IRP_MJ_WRITE',                     'HIGH',   'Write to device; UserBuffer / SystemBuffer - check METHOD'),
     0x05: ('IRP_MJ_QUERY_INFORMATION',         'MEDIUM', 'File info query; potential info leak if struct not zeroed'),
     0x06: ('IRP_MJ_SET_INFORMATION',           'HIGH',   'File info set; FileEndOfFileInformation / rename can be exploited'),
     0x07: ('IRP_MJ_QUERY_EA',                  'MEDIUM', 'Extended attributes query'),
@@ -48,15 +48,15 @@ IRP_MJ = {
     0x0a: ('IRP_MJ_QUERY_VOLUME_INFORMATION',  'MEDIUM', 'Volume info; check output buffer size'),
     0x0b: ('IRP_MJ_SET_VOLUME_INFORMATION',    'HIGH',   'Volume info set; privileged operation'),
     0x0c: ('IRP_MJ_DIRECTORY_CONTROL',         'MEDIUM', 'Dir enumeration; IRP_MN_QUERY_DIRECTORY output bounds'),
-    0x0d: ('IRP_MJ_FILE_SYSTEM_CONTROL',       'HIGH',   'FSCTL; user-mode FsControlCode like IOCTL — same attack surface'),
-    0x0e: ('IRP_MJ_DEVICE_CONTROL',            'HIGH',   'User-mode IOCTLs — primary attack surface (see win_find_ioctls.py)'),
-    0x0f: ('IRP_MJ_INTERNAL_DEVICE_CONTROL',   'HIGH',   'Kernel-mode IOCTLs; called by other drivers — trust boundary issue'),
+    0x0d: ('IRP_MJ_FILE_SYSTEM_CONTROL',       'HIGH',   'FSCTL; user-mode FsControlCode like IOCTL - same attack surface'),
+    0x0e: ('IRP_MJ_DEVICE_CONTROL',            'HIGH',   'User-mode IOCTLs - primary attack surface (see win_find_ioctls.py)'),
+    0x0f: ('IRP_MJ_INTERNAL_DEVICE_CONTROL',   'HIGH',   'Kernel-mode IOCTLs; called by other drivers - trust boundary issue'),
     0x10: ('IRP_MJ_SHUTDOWN',                  'MEDIUM', 'System shutdown notification'),
     0x11: ('IRP_MJ_LOCK_CONTROL',              'MEDIUM', 'File locking'),
     0x12: ('IRP_MJ_CLEANUP',                   'LOW',    'Handle count → 0; check for UAF on cancel'),
     0x13: ('IRP_MJ_CREATE_MAILSLOT',           'HIGH',   'Mailslot creation'),
     0x14: ('IRP_MJ_QUERY_SECURITY',            'MEDIUM', 'Security descriptor query'),
-    0x15: ('IRP_MJ_SET_SECURITY',              'HIGH',   'Security descriptor set — arbitrary DACL modification risk'),
+    0x15: ('IRP_MJ_SET_SECURITY',              'HIGH',   'Security descriptor set - arbitrary DACL modification risk'),
     0x16: ('IRP_MJ_POWER',                     'HIGH',   'Power management; driver may execute arbitrary code on power event'),
     0x17: ('IRP_MJ_SYSTEM_CONTROL',            'MEDIUM', 'WMI; check MOF definitions for information disclosure'),
     0x18: ('IRP_MJ_DEVICE_CHANGE',             'MEDIUM', 'Device change notification'),
@@ -180,13 +180,13 @@ def _analyze_method_neither_handler(bv, func):
 
     if type3 or not has_probe:
         if not has_probe:
-            findings.append("CRITICAL: No ProbeForRead/ProbeForWrite — "
+            findings.append("CRITICAL: No ProbeForRead/ProbeForWrite - "
                             "Type3InputBuffer dereferenced without kernel validation of user pointer")
         if not has_try:
-            findings.append("CRITICAL: No __try/__except — "
+            findings.append("CRITICAL: No __try/__except - "
                             "invalid user pointer will BSOD; missing structured exception handling")
         if type3 and not has_outlen:
-            findings.append("HIGH: Type3InputBuffer handler — "
+            findings.append("HIGH: Type3InputBuffer handler - "
                             "OutputBufferLength not validated before write-back; "
                             "user controls output size → kernel stack/pool overflow")
 
@@ -194,7 +194,7 @@ def _analyze_method_neither_handler(bv, func):
     if 'memcpy' in dt or 'RtlCopyMemory' in dt:
         copy_idx = dt.find('memcpy') if 'memcpy' in dt else dt.find('RtlCopyMemory')
         if not nearby_has_check(dt, copy_idx, _PROBE_APIS + _EXCEPT_PATS, window=400):
-            findings.append("HIGH: memcpy/RtlCopyMemory near METHOD_NEITHER handler without ProbeFor — "
+            findings.append("HIGH: memcpy/RtlCopyMemory near METHOD_NEITHER handler without ProbeFor - "
                             "arbitrary kernel read/write primitive if user pointer is crafted")
 
     return findings
@@ -232,9 +232,9 @@ def find_irp_handlers(bv: BinaryView):
         log_info("  Notes: {}".format(notes))
 
         for handler, setter in handlers:
-            log_info("  Handler: {} (0x{:x}) — set in {}".format(handler.name, handler.start, setter))
+            log_info("  Handler: {} (0x{:x}) - set in {}".format(handler.name, handler.start, setter))
 
-            # For DEVICE_CONTROL and INTERNAL_DEVICE_CONTROL — enumerate IOCTLs and flag METHOD_NEITHER
+            # For DEVICE_CONTROL and INTERNAL_DEVICE_CONTROL - enumerate IOCTLs and flag METHOD_NEITHER
             if irp_idx in (0x0e, 0x0f):
                 dt = get_hlil_text(handler)
                 codes = _extract_ioctls(dt)
@@ -244,10 +244,10 @@ def find_irp_handlers(bv: BinaryView):
                     log_info("    IOCTL 0x{:08X}  Function=0x{:X}  Method={}".format(
                         d['raw'], d['function'], method_str))
                     if d['method'] == 3:
-                        log_info("    *** METHOD_NEITHER — queued for deep analysis ***")
+                        log_info("    *** METHOD_NEITHER - queued for deep analysis ***")
                         neither_handlers.append((handler, code))
 
-            # For READ/WRITE — check buffer origin
+            # For READ/WRITE - check buffer origin
             if irp_idx in (0x03, 0x04):
                 dt = get_hlil_text(handler)
                 has_probe = any(p in dt for p in _PROBE_APIS)
