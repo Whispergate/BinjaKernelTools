@@ -224,8 +224,40 @@ def _ctl_decode(v):
 
 
 def _plausible_ioctl(v):
+    v &= 0xFFFFFFFF
+    # Reject all-bits-set sentinels (e.g. -1 / 0xFFFFFFFF used as refcount compare)
+    if v == 0xFFFFFFFF or (v >> 16) == 0xFFFF:
+        return False
     d = _ctl_decode(v)
     return d['method'] in (0, 1, 2, 3) and d['function'] != 0 and d['device'] != 0
+
+
+def _extract_const(node):
+    """Extract integer from HLIL/MLIL node, int, or wrapped value."""
+    if isinstance(node, int):
+        return node
+    for attr in ('constant',):
+        try:
+            c = getattr(node, attr, None)
+            if isinstance(c, int):
+                return c
+        except Exception:
+            pass
+    # .value may be RegisterValue / PossibleValueSet / int
+    try:
+        v = getattr(node, 'value', None)
+        if isinstance(v, int):
+            return v
+        if v is not None:
+            inner = getattr(v, 'value', None)
+            if isinstance(inner, int):
+                return inner
+    except Exception:
+        pass
+    try:
+        return int(node)
+    except Exception:
+        return None
 
 
 def _find_dispatch_routines(bv):
@@ -333,12 +365,32 @@ def _find_ioctls_in_text(hlil_text):
     return sorted(codes)
 
 
+def _iter_case_consts(case):
+    """Yield integer constants for a HLIL switch case across Binja API variants."""
+    # New API: case.values is list of HLIL_CONST instructions
+    vals = getattr(case, 'values', None)
+    if vals is not None:
+        try:
+            for v in vals:
+                c = _extract_const(v)
+                if c is not None:
+                    yield c & 0xFFFFFFFF
+            return
+        except Exception:
+            pass
+    # Older API: singular .value
+    sv = getattr(case, 'value', None)
+    if sv is not None:
+        c = _extract_const(sv)
+        if c is not None:
+            yield c & 0xFFFFFFFF
+
+
 def _collect_switch_cases(instr, codes):
     try:
         if instr.operation.name == 'HLIL_SWITCH':
             for case in instr.cases:
-                for v in case.values:
-                    v = int(v) & 0xFFFFFFFF
+                for v in _iter_case_consts(case):
                     if v >= 0x200000 and _plausible_ioctl(v):
                         codes.add(v)
         for operand in getattr(instr, 'operands', []):
@@ -525,15 +577,16 @@ def _ioctl_branches_for_dispatcher(dispatcher):
             opname = cond.operation.name
             if opname in ('HLIL_CMP_E', 'HLIL_CMP_NE'):
                 for op in cond.operands:
-                    try:
-                        v = int(op.constant) & 0xFFFFFFFF
-                        if v >= 0x200000 and _plausible_ioctl(v):
-                            results.append(v)
-                    except Exception:
-                        pass
+                    c = _extract_const(op)
+                    if c is None:
+                        continue
+                    v = c & 0xFFFFFFFF
+                    if v >= 0x200000 and _plausible_ioctl(v):
+                        results.append(v)
             elif opname in ('HLIL_OR', 'HLIL_AND'):
                 for op in cond.operands:
-                    results.extend(_const_from_condition(op))
+                    if hasattr(op, 'operation'):
+                        results.extend(_const_from_condition(op))
         except Exception:
             pass
         return results
@@ -544,15 +597,13 @@ def _ioctl_branches_for_dispatcher(dispatcher):
             if opname == 'HLIL_SWITCH':
                 for case in instr.cases:
                     case_consts = []
-                    for v in case.values:
-                        try:
-                            cv = int(v) & 0xFFFFFFFF
-                            if cv >= 0x200000 and _plausible_ioctl(cv):
-                                case_consts.append(cv)
-                        except Exception:
-                            pass
+                    for cv in _iter_case_consts(case):
+                        if cv >= 0x200000 and _plausible_ioctl(cv):
+                            case_consts.append(cv)
                     body_instrs = []
-                    _all_under(case.body, body_instrs)
+                    body = getattr(case, 'body', None)
+                    if body is not None:
+                        _all_under(body, body_instrs)
                     for cv in case_consts:
                         out.append((cv, body_instrs, "0x{:x}".format(instr.address)))
             elif opname == 'HLIL_IF':
@@ -582,6 +633,28 @@ def _ioctl_branches_for_dispatcher(dispatcher):
     return out
 
 
+def _resolve_callee_name(bv, addr):
+    """Resolve an address to its function/symbol name, following IAT thunks."""
+    f = bv.get_function_at(addr)
+    if f and f.name and not f.name.startswith('sub_'):
+        return f.name
+    # Try symbol at address (covers import thunks pointing at IAT slot)
+    sym = bv.get_symbol_at(addr)
+    if sym and sym.name:
+        return sym.name
+    # Try data symbol — import thunk jumps to data ref of the IAT entry
+    try:
+        for ref in bv.get_data_refs_from(addr):
+            ds = bv.get_symbol_at(ref)
+            if ds and ds.name:
+                return ds.name
+    except Exception:
+        pass
+    if f:
+        return f.name
+    return "0x{:x}".format(addr)
+
+
 def _emit_ioctl_vuln_map(bv, emit):
     """Map each IOCTL constant in each dispatcher to vuln APIs/intrinsics in its handler branch."""
     dispatchers = _find_dispatch_routines(bv)
@@ -598,8 +671,7 @@ def _emit_ioctl_vuln_map(bv, emit):
             by_code.setdefault(code, []).extend(instrs)
         for code, instrs in by_code.items():
             vulns, callees = _classify_branch_vulns(bv, instrs)
-            callee_names = sorted({(bv.get_function_at(c).name if bv.get_function_at(c) else "0x{:x}".format(c))
-                                   for c in callees})
+            callee_names = sorted({_resolve_callee_name(bv, c) for c in callees})
             rows.append((code, df.name, vulns, callee_names))
     if not rows:
         emit("    (none)")
