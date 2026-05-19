@@ -158,7 +158,8 @@ def _find_dispatch_routines(bv: BinaryView):
     # Leaf handlers (BufferOverflowStackIoctlHandler etc.) match the name but contain
     # no switch/case on IOCTL codes - filtering them prevents O(N) false-positive noise.
     for func in bv.functions:
-        if any(h in func.name.lower() for h in NAME_HINTS) and func.start not in seen:
+        name_norm = func.name.lower().replace('_', '').replace('-', '')
+        if any(h in name_norm for h in NAME_HINTS) and func.start not in seen:
             if _find_ioctls(func):
                 seen.add(func.start)
                 routines.append(func)

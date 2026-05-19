@@ -207,9 +207,12 @@ def _find_dispatch_routines(bv):
                 if tgt and tgt.start not in seen:
                     seen.add(tgt.start)
                     routines.append(tgt)
-    # S2: name heuristic - only include if function actually contains IOCTL codes
+    # S2: name heuristic - only include if function actually contains IOCTL codes.
+    # Normalize by removing underscores/hyphens so device_control matches 'devicecontrol'
+    # and C++ mangled names like ?device_control@ns@... still match after stripping.
     for func in bv.functions:
-        if any(h in func.name.lower() for h in _NAME_HINTS) and func.start not in seen:
+        name_norm = func.name.lower().replace('_', '').replace('-', '')
+        if any(h in name_norm for h in _NAME_HINTS) and func.start not in seen:
             if _find_ioctls(func):
                 seen.add(func.start)
                 routines.append(func)
