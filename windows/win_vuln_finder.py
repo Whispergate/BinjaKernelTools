@@ -180,9 +180,12 @@ def _collect_pooltags(bv: BinaryView):
 # ---------------------------------------------------------------------------
 
 _DISPATCH_PATTERNS = [
-    r'\+\s*0xe0\b',
-    r'MajorFunction\[(?:0xe|14)\]',
-    r'\+\s*0x70\b',
+    r'\+\s*0xe0\b',                          # untyped: *(arg + 0xe0) = handler
+    r'MajorFunction\[(?:0xe|14)\]',          # typed: arg1->MajorFunction[0xe]
+    r'MajorFunction\[',                       # any MajorFunction slot assignment
+    r'\+\s*0x70\b',                          # untyped: MajorFunction[0]
+    r'\[0x1c\]\s*=',                         # int64_t*[28] subscript (0xE0/8)
+    r'\[28\]\s*=',                            # decimal subscript form
 ]
 _IOCTL_PATS_HEX = [
     r'case\s+0x([0-9A-Fa-f]+)\s*:',
@@ -228,9 +231,13 @@ def _plausible_ioctl(v):
 def _find_dispatch_routines(bv):
     routines = []
     seen = set()
+    s1_lines_scanned = 0
     for func in bv.functions:
         dt = get_hlil_text(func)
+        if not dt:
+            continue
         for line in dt.splitlines():
+            s1_lines_scanned += 1
             for pat in _DISPATCH_PATTERNS:
                 if not re.search(pat, line, re.IGNORECASE):
                     continue
@@ -251,6 +258,9 @@ def _find_dispatch_routines(bv):
                 if tgt and tgt.start not in seen:
                     seen.add(tgt.start)
                     routines.append(tgt)
+                    log_info("[S1] Dispatch via HLIL pattern in {}: -> {} (0x{:x}) line='{}'".format(
+                        func.name, tgt.name, tgt.start, line.strip()[:120]))
+    log_info("[dispatch] S1 scanned {} HLIL lines, found {} routines".format(s1_lines_scanned, len(routines)))
     # S2: name heuristic - only include if function actually contains IOCTL codes.
     # Normalize by removing underscores/hyphens so device_control matches 'devicecontrol'
     # and C++ mangled names like ?device_control@ns@... still match after stripping.
@@ -283,6 +293,21 @@ def _find_dispatch_routines(bv):
             if 'ioctl' in func.name.lower() and func.start not in seen:
                 seen.add(func.start)
                 routines.append(func)
+
+    # S5 (bulletproof fallback): IOCTL-density scan.
+    # Any function with >= 3 plausible IOCTL constants in HLIL is a dispatcher,
+    # regardless of how Binja rendered the DriverEntry assignments. Catches
+    # cases where S1's text-pattern misses (subscript form, exotic typing, etc).
+    if not routines:
+        for func in bv.functions:
+            if func.start in seen:
+                continue
+            codes = _find_ioctls(func)
+            if len(codes) >= 3:
+                seen.add(func.start)
+                routines.append(func)
+                log_info("[S5] Dispatcher by IOCTL-density ({} codes): {} (0x{:x})".format(
+                    len(codes), func.name, func.start))
     return routines
 
 
