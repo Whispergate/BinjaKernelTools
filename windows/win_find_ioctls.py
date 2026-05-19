@@ -66,18 +66,21 @@ DISPATCH_PATTERNS = [
     r'MajorFunction\[(?:0xe|14)\]',
     r'\+\s*0x70\b',
 ]
-# hex-prefixed patterns
+# hex-prefixed patterns — ordered from specific to broad
 _IOCTL_PATS_HEX = [
     r'case\s+0x([0-9A-Fa-f]+)\s*:',
     r'ioControlCode\s*[u]?==\s*0x([0-9A-Fa-f]+)',
     r'(?:if|else\s+if)\s*\([^)]*[u]?==\s*0x([0-9A-Fa-f]+)',
     r'\w+\s*[u]?==\s*0x([0-9A-Fa-f]+)',
+    # broad fallback: catches *(expr) == 0xNNN where LHS is a dereference/complex expr
+    r'[u]?==\s*0x([0-9A-Fa-f]{5,})',
 ]
-# bare decimal patterns - floor 0x200000 == 2097152 (7 digits)
+# bare decimal patterns — floor 0x200000 == 2097152 (7 digits)
 _IOCTL_PATS_DEC = [
     r'case\s+(\d{7,})\s*:',
     r'(?:if|else\s+if)\s*\([^)]*[u]?==\s*(\d{7,})\b',
     r'\w+\s*[u]?==\s*(\d{7,})\b',
+    r'[u]?==\s*(\d{7,})\b',
 ]
 # keep old name as alias so win_vuln_finder copy still works independently
 IOCTL_PATTERNS = _IOCTL_PATS_HEX

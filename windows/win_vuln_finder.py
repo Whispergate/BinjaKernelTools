@@ -147,11 +147,13 @@ _IOCTL_PATS_HEX = [
     r'ioControlCode\s*[u]?==\s*0x([0-9A-Fa-f]+)',
     r'(?:if|else\s+if)\s*\([^)]*[u]?==\s*0x([0-9A-Fa-f]+)',
     r'\w+\s*[u]?==\s*0x([0-9A-Fa-f]+)',
+    r'[u]?==\s*0x([0-9A-Fa-f]{5,})',
 ]
 _IOCTL_PATS_DEC = [
     r'case\s+(\d{7,})\s*:',
     r'(?:if|else\s+if)\s*\([^)]*[u]?==\s*(\d{7,})\b',
     r'\w+\s*[u]?==\s*(\d{7,})\b',
+    r'[u]?==\s*(\d{7,})\b',
 ]
 _IOCTL_PATTERNS = _IOCTL_PATS_HEX  # backward-compat alias
 _NAME_HINTS = [
