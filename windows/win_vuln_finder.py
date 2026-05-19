@@ -356,6 +356,240 @@ def _fmt_ioctl_row(addr, code):
 
 
 # ---------------------------------------------------------------------------
+# IOCTL <-> Vulnerable Function cross-reference
+# ---------------------------------------------------------------------------
+
+# Substring -> short label used in IOCTL handler reports
+_VULN_API_LABELS = {
+    'MmMapIoSpace': 'MmMapIoSpace',
+    'MmMapIoSpaceEx': 'MmMapIoSpaceEx',
+    'MmUnmapIoSpace': 'MmUnmapIoSpace',
+    'MmCopyMemory': 'MmCopyMemory',
+    'MmGetPhysicalAddress': 'MmGetPhysicalAddress',
+    'MmMapLockedPagesSpecifyCache': 'MmMapLockedPagesSpecifyCache',
+    'ZwOpenSection': 'ZwOpenSection', 'ZwMapViewOfSection': 'ZwMapViewOfSection',
+    'HalGetBusDataByOffset': 'HalGetBusDataByOffset',
+    'HalSetBusDataByOffset': 'HalSetBusDataByOffset',
+    'memcpy': 'memcpy', 'memmove': 'memmove', 'RtlCopyMemory': 'RtlCopyMemory',
+}
+
+_VULN_INTRINSIC_LABELS = {
+    '__rdmsr': 'rdmsr', '__wrmsr': 'wrmsr',
+    '_rdpmc': 'rdpmc', '__rdpmc': 'rdpmc',
+    '__in_': 'in (port-IO read)', '__out_': 'out (port-IO write)',
+    '__halt': 'hlt', 'trap(0xd)': 'hlt/trap',
+    '__readcr': 'mov from CRx', '__writecr': 'mov to CRx',
+    '__readdr': 'mov from DRx', '__writedr': 'mov to DRx',
+    '__swapgs': 'swapgs', '__invd': 'invd', '__wbinvd': 'wbinvd',
+}
+
+
+def _scan_text_for_vulns(text):
+    """Return set of vuln labels found in given HLIL text."""
+    hits = set()
+    for needle, label in _VULN_API_LABELS.items():
+        if needle in text:
+            hits.add(label)
+    for needle, label in _VULN_INTRINSIC_LABELS.items():
+        if needle in text:
+            hits.add(label)
+    return hits
+
+
+def _walk_collect_calls(instr, callee_starts):
+    """Recursively collect call destination addresses from one HLIL instr."""
+    try:
+        opname = instr.operation.name
+        if opname in ('HLIL_CALL', 'HLIL_TAILCALL', 'HLIL_CALL_SSA', 'HLIL_TAILCALL_SSA'):
+            dest = getattr(instr, 'dest', None)
+            if dest is not None:
+                cval = getattr(dest, 'constant', None)
+                if cval is not None:
+                    try:
+                        callee_starts.add(int(cval))
+                    except Exception:
+                        pass
+                else:
+                    dval = getattr(dest, 'value', None)
+                    inner = getattr(dval, 'value', None) if dval is not None else None
+                    if inner is not None:
+                        try:
+                            callee_starts.add(int(inner))
+                        except Exception:
+                            pass
+        for operand in getattr(instr, 'operands', []):
+            if hasattr(operand, 'operation'):
+                _walk_collect_calls(operand, callee_starts)
+            elif hasattr(operand, '__iter__') and not isinstance(operand, (str, bytes)):
+                for item in operand:
+                    if hasattr(item, 'operation'):
+                        _walk_collect_calls(item, callee_starts)
+    except Exception:
+        pass
+
+
+def _walk_collect_text(instr, parts):
+    """Collect string forms of every nested instruction."""
+    try:
+        parts.append(str(instr))
+        for operand in getattr(instr, 'operands', []):
+            if hasattr(operand, 'operation'):
+                _walk_collect_text(operand, parts)
+            elif hasattr(operand, '__iter__') and not isinstance(operand, (str, bytes)):
+                for item in operand:
+                    if hasattr(item, 'operation'):
+                        _walk_collect_text(item, parts)
+    except Exception:
+        pass
+
+
+def _classify_branch_vulns(bv, instrs):
+    """Given list of HLIL instructions forming a handler branch, return vuln labels."""
+    text_parts = []
+    callee_starts = set()
+    for instr in instrs:
+        _walk_collect_text(instr, text_parts)
+        _walk_collect_calls(instr, callee_starts)
+    branch_text = "\n".join(text_parts)
+    vulns = _scan_text_for_vulns(branch_text)
+    # Inline check failed - look one call-level deeper into branch callees.
+    for caddr in callee_starts:
+        f = bv.get_function_at(caddr)
+        if not f:
+            continue
+        try:
+            ctext = get_hlil_text(f)
+        except Exception:
+            ctext = ''
+        sub_vulns = _scan_text_for_vulns(ctext)
+        for v in sub_vulns:
+            vulns.add("{} (via {})".format(v, f.name))
+    return vulns, callee_starts
+
+
+def _ioctl_branches_for_dispatcher(dispatcher):
+    """
+    Return list of (ioctl_const, [HLIL instrs in branch], compare_addr).
+    Handles both HLIL_SWITCH cases and HLIL_IF (== const) bodies.
+    """
+    out = []
+    try:
+        hlil = dispatcher.hlil
+        if not hlil:
+            return out
+    except Exception:
+        return out
+
+    def _all_under(instr, bucket):
+        try:
+            bucket.append(instr)
+            for op in getattr(instr, 'operands', []):
+                if hasattr(op, 'operation'):
+                    _all_under(op, bucket)
+                elif hasattr(op, '__iter__') and not isinstance(op, (str, bytes)):
+                    for it in op:
+                        if hasattr(it, 'operation'):
+                            _all_under(it, bucket)
+        except Exception:
+            pass
+
+    def _const_from_condition(cond):
+        """If cond is `var == const`, return int(const). Walk OR chains too."""
+        results = []
+        try:
+            opname = cond.operation.name
+            if opname in ('HLIL_CMP_E', 'HLIL_CMP_NE'):
+                for op in cond.operands:
+                    try:
+                        v = int(op.constant) & 0xFFFFFFFF
+                        if v >= 0x200000 and _plausible_ioctl(v):
+                            results.append(v)
+                    except Exception:
+                        pass
+            elif opname in ('HLIL_OR', 'HLIL_AND'):
+                for op in cond.operands:
+                    results.extend(_const_from_condition(op))
+        except Exception:
+            pass
+        return results
+
+    def _visit(instr):
+        try:
+            opname = instr.operation.name
+            if opname == 'HLIL_SWITCH':
+                for case in instr.cases:
+                    case_consts = []
+                    for v in case.values:
+                        try:
+                            cv = int(v) & 0xFFFFFFFF
+                            if cv >= 0x200000 and _plausible_ioctl(cv):
+                                case_consts.append(cv)
+                        except Exception:
+                            pass
+                    body_instrs = []
+                    _all_under(case.body, body_instrs)
+                    for cv in case_consts:
+                        out.append((cv, body_instrs, "0x{:x}".format(instr.address)))
+            elif opname == 'HLIL_IF':
+                consts = _const_from_condition(instr.condition)
+                if consts:
+                    body_instrs = []
+                    if instr.true:
+                        _all_under(instr.true, body_instrs)
+                    for cv in consts:
+                        out.append((cv, body_instrs, "0x{:x}".format(instr.address)))
+            for op in getattr(instr, 'operands', []):
+                if hasattr(op, 'operation'):
+                    _visit(op)
+                elif hasattr(op, '__iter__') and not isinstance(op, (str, bytes)):
+                    for it in op:
+                        if hasattr(it, 'operation'):
+                            _visit(it)
+        except Exception:
+            pass
+
+    try:
+        for block in hlil:
+            for instr in block:
+                _visit(instr)
+    except Exception:
+        pass
+    return out
+
+
+def _emit_ioctl_vuln_map(bv, emit):
+    """Map each IOCTL constant in each dispatcher to vuln APIs/intrinsics in its handler branch."""
+    dispatchers = _find_dispatch_routines(bv)
+    if not dispatchers:
+        emit("    (no dispatcher)")
+        return
+    rows = []  # (ioctl, dispatcher_name, vuln_label_set, callees)
+    for df in dispatchers:
+        branches = _ioctl_branches_for_dispatcher(df)
+        # Aggregate by ioctl_const (cases with same constant unify)
+        by_code = {}
+        for entry in branches:
+            code, instrs = entry[0], entry[1]
+            by_code.setdefault(code, []).extend(instrs)
+        for code, instrs in by_code.items():
+            vulns, callees = _classify_branch_vulns(bv, instrs)
+            callee_names = sorted({(bv.get_function_at(c).name if bv.get_function_at(c) else "0x{:x}".format(c))
+                                   for c in callees})
+            rows.append((code, df.name, vulns, callee_names))
+    if not rows:
+        emit("    (none)")
+        return
+    for code, dname, vulns, callees in sorted(rows, key=lambda x: x[0]):
+        d = _ctl_decode(code)
+        method = METHOD_MAP.get(d['method'], str(d['method']))
+        vlabel = ", ".join(sorted(vulns)) if vulns else "(no dangerous calls/intrinsics)"
+        clabel = ", ".join(callees) if callees else "inline"
+        sev = "HIGH" if vulns else "INFO"
+        emit("    [{}] IOCTL 0x{:08X} ({}) in {}  ->  calls: {}  ::  {}".format(
+            sev, code, method, dname, clabel, vlabel))
+
+
+# ---------------------------------------------------------------------------
 # Main plugin entry
 # ---------------------------------------------------------------------------
 
@@ -526,6 +760,10 @@ def find_driver_vulns(bv: BinaryView):
         emit("    " + r)
     if not ioctl_rows:
         emit("    (none)")
+
+    # ---- IOCTL <-> Vulnerable Functions cross-reference ----
+    emit("[>] IOCTL <-> Vulnerable Functions...")
+    _emit_ioctl_vuln_map(bv, emit)
 
     # ---- Device-creation ACL hygiene ----
     emit("[>] Device-creation ACL...")
