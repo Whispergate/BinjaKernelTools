@@ -221,3 +221,5 @@ __marimo__/
 
 Driver.sys
 analyze_pe.py
+winring0.sys
+.mcp.json

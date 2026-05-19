@@ -29,7 +29,30 @@ from ..shared.helpers import get_hlil_text, get_callers, looks_user_driven, near
 # Config
 # ---------------------------------------------------------------------------
 
-_OPCODE_SEVERITY = {'rdpmc': 'HIGH', 'rdmsr': 'HIGH', 'wrmsr': 'HIGH'}
+_OPCODE_SEVERITY = {
+    'rdpmc': 'HIGH', 'rdmsr': 'HIGH', 'wrmsr': 'HIGH',
+    'in': 'HIGH', 'out': 'HIGH', 'hlt': 'HIGH',
+    'cli': 'MEDIUM', 'sti': 'MEDIUM',
+    'invd': 'HIGH', 'wbinvd': 'MEDIUM',
+    'lgdt': 'HIGH', 'lidt': 'HIGH',
+    'swapgs': 'HIGH', 'xsetbv': 'HIGH',
+}
+
+# Binja lifts privileged opcodes as HLIL intrinsics. Map substring -> severity.
+# Substring match catches __in_al_dx, __out_dx_eax, __readcr0, etc.
+_INTRINSIC_OPCODES = {
+    '__rdmsr': 'HIGH', '__wrmsr': 'HIGH',
+    '_rdpmc': 'HIGH', '__rdpmc': 'HIGH',
+    '__in_': 'HIGH', '__out_': 'HIGH',
+    '__halt': 'HIGH', 'trap(0xd)': 'HIGH',
+    '__readcr': 'HIGH', '__writecr': 'HIGH',
+    '__readdr': 'HIGH', '__writedr': 'HIGH',
+    '__lgdt': 'HIGH', '__lidt': 'HIGH',
+    '__sgdt': 'MEDIUM', '__sidt': 'MEDIUM',
+    '__swapgs': 'HIGH', '__invd': 'HIGH', '__wbinvd': 'MEDIUM',
+    '__cli': 'MEDIUM', '__sti': 'MEDIUM',
+    '__cpuid': 'LOW',
+}
 
 _C_FUNCS = ['sprintf', 'swprintf', 'snprintf', 'vsprintf',
             'memcpy', 'memmove', 'RtlCopyMemory',
@@ -51,6 +74,8 @@ _PHYSMEM_APIS = [
     'MmGetPhysicalAddress', 'MmAllocateContiguousMemory',
     'MmProbeAndLockPages', 'MmMapLockedPagesSpecifyCache',
     'MmGetSystemAddressForMdlSafe',
+    'HalGetBusDataByOffset', 'HalSetBusDataByOffset',
+    'HalGetBusData', 'HalSetBusData',
 ]
 
 _ALLOC_NAMES = [
@@ -75,8 +100,18 @@ _DEVICE_INDICATORS = ["\\device\\", "\\dosdevices\\", "\\\\.\\", "\\??\\"]
 # ---------------------------------------------------------------------------
 
 def _is_ioctl_context(dt):
-    return ('IRP_MJ_DEVICE_CONTROL' in dt or 'IoControlCode' in dt or
-            'Parameters.DeviceIoControl' in dt)
+    # Typed fields (post-DRIVER_OBJECT typing)
+    if any(k in dt for k in (
+        'IRP_MJ_DEVICE_CONTROL', 'IoControlCode',
+        'Parameters.DeviceIoControl',
+        'Tail.Overlay',                     # IO_STACK_LOCATION via overlay
+        'AssociatedIrp.MasterIrp',          # SystemBuffer alias
+        'AssociatedIrp.SystemBuffer',
+    )):
+        return True
+    # Untyped offset fallback: dispatcher reads IRP at +0xb8 (CurrentStackLocation)
+    # and IoControlCode at IO_STACK_LOCATION +0x18.
+    return ('+ 0xb8)' in dt or '+ 0xB8)' in dt) and ('+ 0x18)' in dt or 'MajorFunction' in dt)
 
 
 def _looks_user_driven_win(dt):
@@ -85,8 +120,15 @@ def _looks_user_driven_win(dt):
         'Parameters.DeviceIoControl.OutputBufferLength',
         'Parameters.DeviceIoControl.Type3InputBuffer',
         'Irp->AssociatedIrp.SystemBuffer',
+        'AssociatedIrp.SystemBuffer',
+        'AssociatedIrp.MasterIrp',
         'Irp->UserBuffer',
+        'UserBuffer',
         'MdlAddress',
+        # Untyped offset forms (IO_STACK_LOCATION fields)
+        '+ 0x8)',   # InputBufferLength / OutputBufferLength
+        '+ 0x10)',  # OutputBufferLength / IoControlCode neighbor
+        '+ 0x18)',  # IoControlCode
     ]
     return any(k in dt for k in keys)
 
@@ -387,21 +429,46 @@ def find_driver_vulns(bv: BinaryView):
         emit("    (none)")
 
     # ---- Opcodes ----
-    emit("[>] Dangerous opcodes (rdpmc/rdmsr/wrmsr)...")
+    emit("[>] Dangerous opcodes (raw mnemonic + HLIL intrinsic)...")
     opcode_hits = []
+    seen_op = set()
     for func in bv.functions:
+        # Raw disassembly token scan
         try:
             for block in func.basic_blocks:
                 for dl in block.disassembly_text:
                     if not dl.tokens:
                         continue
-                    mnem = dl.tokens[0].text.lower().strip()
-                    if mnem in _OPCODE_SEVERITY:
-                        opcode_hits.append((mnem, func.name, "0x{:x}".format(dl.address)))
+                    # First non-whitespace token is the mnemonic
+                    mnem = None
+                    for tok in dl.tokens:
+                        t = tok.text.strip().lower()
+                        if t:
+                            mnem = t
+                            break
+                    if mnem and mnem in _OPCODE_SEVERITY:
+                        key = (mnem, func.start, dl.address)
+                        if key not in seen_op:
+                            seen_op.add(key)
+                            opcode_hits.append(
+                                (_OPCODE_SEVERITY[mnem], mnem, func.name, "0x{:x}".format(dl.address)))
         except Exception:
             pass
-    for mnem, fn, addr in sorted(opcode_hits):
-        emit("    [{}] {} in {} at {}".format(_OPCODE_SEVERITY[mnem], mnem, fn, addr))
+        # HLIL intrinsic scan (catches Binja-lifted privileged ops)
+        try:
+            dt = get_hlil_text(func)
+            if not dt:
+                continue
+            for needle, sev in _INTRINSIC_OPCODES.items():
+                if needle in dt:
+                    key = (needle, func.start, 0)
+                    if key not in seen_op:
+                        seen_op.add(key)
+                        opcode_hits.append((sev, needle, func.name, "(intrinsic)"))
+        except Exception:
+            pass
+    for sev, mnem, fn, addr in sorted(opcode_hits):
+        emit("    [{}] {} in {} at {}".format(sev, mnem, fn, addr))
     if not opcode_hits:
         emit("    (none)")
 
@@ -458,6 +525,30 @@ def find_driver_vulns(bv: BinaryView):
     for r in sorted(set(ioctl_rows)):
         emit("    " + r)
     if not ioctl_rows:
+        emit("    (none)")
+
+    # ---- Device-creation ACL hygiene ----
+    emit("[>] Device-creation ACL...")
+    has_create = any(s.name == 'IoCreateDevice'       for s in bv.get_symbols())
+    has_secure = any(s.name == 'IoCreateDeviceSecure' for s in bv.get_symbols())
+    has_symlnk = any(s.name == 'IoCreateSymbolicLink' for s in bv.get_symbols())
+    if has_create and not has_secure:
+        sev = 'HIGH' if has_symlnk else 'MEDIUM'
+        emit("    [{}] IoCreateDevice without IoCreateDeviceSecure - default ACL likely permits non-admin open{}".format(
+            sev, ' (symbolic link exposed to Win32)' if has_symlnk else ''))
+    else:
+        emit("    (ok)")
+
+    # ---- PCI config space access (Hal*BusData*) ----
+    emit("[>] PCI config space (HalGetBusDataByOffset / HalSetBusDataByOffset)...")
+    pci_hit = False
+    for api in ('HalGetBusDataByOffset', 'HalSetBusDataByOffset', 'HalGetBusData', 'HalSetBusData'):
+        for func, addr in get_callers(bv, api):
+            pci_hit = True
+            dt = get_hlil_text(func)
+            sev = 'HIGH' if _is_ioctl_context(dt) and _looks_user_driven_win(dt) else 'MEDIUM'
+            emit("    [{}] {} in {} at 0x{:x}".format(sev, api, func.name, addr))
+    if not pci_hit:
         emit("    (none)")
 
     # ---- Physical memory / IO space ----
