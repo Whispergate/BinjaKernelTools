@@ -26,11 +26,78 @@ from .win_vuln_finder import (
 from .win_primitives import (
     _detect_write_what_where, _detect_arb_read, _detect_stack_bof,
     _detect_pool_bof, _detect_token_swap_enabler, _detect_double_fetch,
-    _detect_ioring, _detect_null_deref, _deep_text,
+    _detect_ioring, _detect_null_deref, _deep_text, _detect_name_hints,
 )
 
 
-def _classify(text):
+_NAME_TAG_MAP = {
+    'stack buffer overflow': 'stack_bof',
+    'pool buffer overflow':  'pool_bof',
+    'pool overflow':         'pool_bof',
+    'heap/pool':             'pool_bof',
+    'write-what-where':      'write_what_where',
+    'arbitrary kernel read': 'arb_read',
+    'arbitrary kernel write':'write_what_where',
+    'arbitrary write':       'write_what_where',
+    'arbitrary read':        'arb_read',
+    'arbitrary increment':   'arb_increment',
+    'arb r/w':               'arb_rw',
+    'virtual mem read':      'arb_read',
+    'virtual mem write':     'write_what_where',
+    'process mem read':      'process_read',
+    'process mem write':     'process_write',
+    'write to null':         'null_deref',
+    'null pointer deref':    'null_deref',
+    'null deref':            'null_deref',
+    'uninitialized':         'uninit_leak',
+    'memory disclosure':     'uninit_leak',
+    'info leak':             'uninit_leak',
+    'integer overflow':      'int_overflow',
+    'type confusion':        'type_confusion',
+    'fake object':           'type_confusion',
+    'use-after-free':        'uaf',
+    'double free':           'uaf',
+    'double-fetch':          'double_fetch',
+    'race condition':        'race',
+    'insecure file':         'insecure_file',
+    # privileged
+    'msr read':              'msr_rw',
+    'msr write':             'msr_rw',
+    'port io':               'port_io',
+    'port in':               'port_io',
+    'port out':              'port_io',
+    'phys mem':              'phys_mem',
+    'physical memory':       'phys_mem',
+    'memory map':            'phys_mem',
+    'io space map':          'phys_mem',
+    'pci':                   'pci_config',
+    'crx read':              'cr_access',
+    'crx write':             'cr_access',
+    'drx read':              'cr_access',
+    'drx write':             'cr_access',
+    'gdt':                   'cr_access',
+    'idt':                   'cr_access',
+    # ring-0
+    'ring-0':                'ring0_exec',
+    'shellcode':             'ring0_exec',
+    # process
+    'process kill':          'process_kill',
+    'process suspend':       'process_kill',
+    'process protection':    'process_protect',
+    'token':                 'token_swap',
+    # tampering
+    'callback removal':      'callback_removal',
+    'etw tampering':         'etw_tamper',
+    'ssdt':                  'ssdt_tamper',
+    # driver/section
+    'driver load':           'driver_load',
+    'driver map':            'driver_load',
+    'section open':          'section_access',
+    'section map':           'section_access',
+}
+
+
+def _classify(text, bv=None, instrs=None):
     tags = []
     if _detect_write_what_where(text):   tags.append('write_what_where')
     if _detect_arb_read(text):           tags.append('arb_read')
@@ -40,6 +107,12 @@ def _classify(text):
     if _detect_double_fetch(text):       tags.append('double_fetch')
     if _detect_null_deref(text):         tags.append('null_deref')
     if _detect_ioring(text):             tags.append('ioring')
+    if bv is not None and instrs is not None:
+        for _sev, label in _detect_name_hints(bv, instrs):
+            ll = label.lower()
+            for needle, tag in _NAME_TAG_MAP.items():
+                if needle in ll and tag not in tags:
+                    tags.append(tag)
     return tags
 
 
@@ -71,6 +144,24 @@ _PAYLOAD_NOTES = {
     'double_fetch':     "Double-fetch TOCTOU: race a second thread mutating the user buffer.",
     'null_deref':       "NULL deref: trigger alloc failure path (low-mem / huge size) to crash.",
     'ioring':           "IORING primitive: see knifecoat.com / windows-internals.com for full arb R/W chain.",
+    'arb_rw':           "Generic arb R/W primitive. Probe layout: [u64 addr][u64 val] or [u64 addr][u32 len][bytes].",
+    'arb_increment':    "Arbitrary increment: layout = [u64 target_addr]. Use to flip _SEP_TOKEN_PRIVILEGES bits.",
+    'process_read':     "Process memory read: layout often [u32 pid][u64 va][u32 len]. Returns bytes in out_buf.",
+    'process_write':    "Process memory write: layout often [u32 pid][u64 va][u32 len][bytes].",
+    'msr_rw':           "MSR R/W: layout often [u32 msr_index] for read or [u32 msr_index][u64 value] for write. Patch LSTAR/STAR/SYSENTER_EIP.",
+    'port_io':          "Port IO: layout often [u16 port][u8 size]. Used for PCI/SMRAM/embedded controllers.",
+    'phys_mem':         "Physical memory access: layout often [u64 phys_addr][u32 len]. Walk PFN -> kernel VA -> read/write.",
+    'pci_config':       "PCI config space: layout often [u8 bus][u8 dev][u8 func][u16 offset][u8 size].",
+    'cr_access':        "Control/Debug register access. Disabling CR0.WP enables write to read-only kernel pages (SMEP bypass legacy).",
+    'ring0_exec':       "Capcom-style ring-0 exec: pass user function pointer; driver calls it in kernel context. Direct LPE.",
+    'process_kill':     "Process kill primitive: pass target PID. EDR/AV bypass class.",
+    'process_protect':  "Process protection toggle: flip EPROCESS.SignatureLevel / PsProtection.",
+    'callback_removal': "Callback array removal: walk PsSetCreateProcessNotifyRoutine / Cm / Ob callback arrays and zero entries.",
+    'etw_tamper':       "ETW tampering: patch EtwThreatIntProvRegHandle or EtwpEventEnabled tables.",
+    'ssdt_tamper':      "SSDT hook/unhook: read/write ntoskrnl!KiServiceTable entries.",
+    'driver_load':      "Driver load primitive: ZwLoadDriver / IoCreateDriver / MmLoadSystemImage style.",
+    'section_access':   "Section open/map: ZwOpenSection + ZwMapViewOfSection of \\KernelObjects\\... or \\Device\\PhysicalMemory.",
+    'insecure_file':    "Kernel file/registry access in driver context (no impersonation) - SYSTEM-level R/W on user-supplied path.",
 }
 
 
@@ -143,7 +234,7 @@ def _emit_c(driver_name, device_path, entries):
         out.append('    BYTE  out_buf[0x' + ('%X' % out_sz) + '] = {0};')
         out.append('    DWORD br = 0;')
         out.append(_payload_comment_c(tags).rstrip('\n'))
-        out.append('    // TODO: populate in_buf with target-specific layout (see notes above).')
+        out.append('    // TODO: populate in_buf per layout in the // - lines above.')
         out.append('    return send_ioctl(code, in_buf, sizeof(in_buf), out_buf, sizeof(out_buf), &br);')
         out.append('}')
         out.append('')
@@ -169,26 +260,68 @@ def _emit_c(driver_name, device_path, entries):
     out.append('}')
     out.append('')
 
-    out.append('int main(int argc, char **argv) {')
-    out.append('    if (!open_device()) return 1;')
-    out.append('    int which = (argc > 1) ? atoi(argv[1]) : -1;')
-    out.append('    if (argc > 1 && _stricmp(argv[1], "fuzz") == 0) {')
-    out.append('        unsigned n = (argc > 2) ? (unsigned)atoi(argv[2]) : 1000;')
-    out.append('        return fuzz_all(n) ? 0 : 1;')
+    out.append('static int probe_all(void) {')
+    out.append('    DWORD codes[] = {')
+    for _i, code, _m, _t, _is, _os in entries:
+        out.append('        0x' + ('%08X' % code) + ',')
+    out.append('    };')
+    out.append('    BYTE  in_buf[0x400] = {0};')
+    out.append('    BYTE  out_buf[0x400] = {0};')
+    out.append('    DWORD br = 0; int hits = 0;')
+    out.append('    int n = sizeof(codes)/sizeof(codes[0]);')
+    out.append('    printf("[>] Probing %d IOCTLs with zero buffer...\\n", n);')
+    out.append('    for (int i = 0; i < n; i++) {')
+    out.append('        BOOL ok = DeviceIoControl(g_dev, codes[i], in_buf, sizeof(in_buf),')
+    out.append('                                  out_buf, sizeof(out_buf), &br, NULL);')
+    out.append('        DWORD err = ok ? 0 : GetLastError();')
+    out.append('        printf("  [%3d] 0x%08X %s br=%-5lu winerr=%lu\\n",')
+    out.append('               i, codes[i], ok ? "OK " : "ERR", br, err);')
+    out.append('        if (ok) hits++;')
     out.append('    }')
-    out.append('    switch (which) {')
-    for idx, code, _m, _t, _is, _os in entries:
-        out.append('        case ' + str(idx) + ': return trigger_' + str(idx) + '() ? 0 : 1;')
-    out.append('        default:')
-    out.append('            puts("Usage: poc <index>  |  poc fuzz [iters]");')
-    out.append('            puts("Index -> IOCTL:");')
+    out.append('    printf("[+] Probe done. %d/%d returned success.\\n", hits, n);')
+    out.append('    return 1;')
+    out.append('}')
+    out.append('')
+    out.append('static void spawn_cmd(void) {')
+    out.append('    printf("[+] Spawning cmd.exe...\\n");')
+    out.append('    system("cmd.exe");')
+    out.append('}')
+    out.append('')
+    out.append('static void pause_exit(void) {')
+    out.append('    puts("\\nPress Enter to exit...");')
+    out.append('    (void)getchar();')
+    out.append('}')
+    out.append('')
+    out.append('int main(int argc, char **argv) {')
+    out.append('    printf("[*] Target device: %s\\n", DEVICE_PATH);')
+    out.append('    if (!open_device()) { pause_exit(); return 1; }')
+    out.append('    int rc = 0;')
+    out.append('    if (argc < 2) {')
+    out.append('        probe_all();')
+    out.append('    } else if (_stricmp(argv[1], "fuzz") == 0) {')
+    out.append('        unsigned n = (argc > 2) ? (unsigned)atoi(argv[2]) : 1000;')
+    out.append('        printf("[>] Fuzzing %u iterations...\\n", n);')
+    out.append('        fuzz_all(n);')
+    out.append('        puts("[+] Fuzz done.");')
+    out.append('    } else if (_stricmp(argv[1], "list") == 0) {')
+    out.append('        puts("Index -> IOCTL:");')
     for idx, code, method, tags, _is, _os in entries:
         label = ", ".join(tags) if tags else "(no primitive)"
-        out.append('            puts("  ' + str(idx) + ' -> 0x' + ('%08X' % code) +
+        out.append('        puts("  ' + str(idx) + ' -> 0x' + ('%08X' % code) +
                    ' ' + method + ' [' + label + ']");')
+    out.append('    } else if (_stricmp(argv[1], "shell") == 0 || _stricmp(argv[1], "cmd") == 0) {')
+    out.append('        spawn_cmd();')
+    out.append('    } else {')
+    out.append('        int which = atoi(argv[1]);')
+    out.append('        switch (which) {')
+    for idx, code, _m, _t, _is, _os in entries:
+        out.append('            case ' + str(idx) + ': rc = trigger_' + str(idx) + '() ? 0 : 1; break;')
+    out.append('            default: puts("Unknown index. Use: poc list"); rc = 2; break;')
+    out.append('        }')
     out.append('    }')
     out.append('    CloseHandle(g_dev);')
-    out.append('    return 0;')
+    out.append('    pause_exit();')
+    out.append('    return rc;')
     out.append('}')
     return "\n".join(out) + "\n"
 
@@ -219,12 +352,18 @@ def _emit_py(driver_name, device_path, entries):
     out.append('OPEN_EXISTING = 3')
     out.append('INVALID = wt.HANDLE(-1).value')
     out.append('')
-    out.append('DEVICE_PATH = rb"' + device_path + '"')
+    out.append('DEVICE_PATH = b"' + device_path + '"')
+    out.append('')
+    out.append('def _pause():')
+    out.append('    try: input("\\nPress Enter to exit...")')
+    out.append('    except EOFError: pass')
     out.append('')
     out.append('def open_device():')
     out.append('    h = CreateFileA(DEVICE_PATH, GENERIC_RW, 3, None, OPEN_EXISTING, 0, None)')
     out.append('    if h == INVALID:')
-    out.append('        raise OSError("CreateFile failed: " + str(ctypes.get_last_error()))')
+    out.append('        err = ctypes.get_last_error()')
+    out.append('        raise OSError(f"CreateFile {DEVICE_PATH!r} failed: WinError {err}")')
+    out.append('    print(f"[+] Opened {DEVICE_PATH.decode()} -> handle {h:#x}")')
     out.append('    return h')
     out.append('')
     out.append('def ioctl(h, code, in_buf=b"", out_size=0x100):')
@@ -247,43 +386,99 @@ def _emit_py(driver_name, device_path, entries):
                    ', out_size=0x' + ('%X' % out_sz) + '),')
     out.append(']')
     out.append('')
-    out.append('def trigger(h, idx):')
+    out.append('def trigger(h, idx, payload=None, out_size=None):')
     out.append('    entry = IOCTLS[idx]')
     out.append('    code  = entry["code"]')
     out.append('    tags  = entry["tags"]')
-    out.append('    # Detected primitives:')
-    out.append('    for t in tags:')
-    out.append('        print("  - primitive:", t)')
-    out.append('    in_buf = b"\\x00" * entry["in_size"]')
-    out.append('    # TODO: customize in_buf per primitive (see comments at top).')
-    out.append('    ok, data, br = ioctl(h, code, in_buf, entry["out_size"])')
-    out.append('    print(f"[{idx}] code=0x{code:08X} ok={ok} br={br} out[:32]={data[:32].hex()}")')
+    out.append('    print(f"[*] Triggering IOCTL 0x{code:08X} (Index: {idx})")')
+    out.append('    if tags:')
+    out.append('        print(f"    - Detected primitives: {", ".join(tags)}")')
+    out.append('    in_buf = payload if payload is not None else b"\\x00" * entry["in_size"]')
+    out.append('    sz_out = out_size if out_size is not None else entry["out_size"]')
+    out.append('    ok, data, br = ioctl(h, code, in_buf, sz_out)')
+    out.append('    print(f"    - ok={ok} br={br} out[:32]={data[:32].hex()}")')
+    out.append('    return ok, data, br')
     out.append('')
     out.append('def fuzz(h, iters=1000):')
-    out.append('    for _ in range(iters):')
+    out.append('    print(f"[>] Starting structured fuzzing for {iters} iterations...")')
+    out.append('    interesting_sizes = [0, 1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]')
+    out.append('    interesting_vals = [b"\\x00", b"\\xff", b"\\x41", b"\\xde\\xad\\xbe\\xef"]')
+    out.append('    for i in range(iters):')
     out.append('        for e in IOCTLS:')
-    out.append('            sz = random.randint(1, 0x2000)')
-    out.append('            buf = os.urandom(sz)')
+    out.append('            if random.random() < 0.3:')
+    out.append('                sz = random.choice(interesting_sizes)')
+    out.append('                val = random.choice(interesting_vals)')
+    out.append('                buf = val * (sz // len(val) if len(val) > 0 else 1)')
+    out.append('                buf = buf[:sz]')
+    out.append('            else:')
+    out.append('                sz = random.randint(1, 0x2000)')
+    out.append('                buf = os.urandom(sz)')
+    out.append('            out_sz = random.choice(interesting_sizes) if random.random() < 0.3 else random.randint(1, 0x2000)')
     out.append('            try:')
-    out.append('                ioctl(h, e["code"], buf, random.randint(1, 0x2000))')
-    out.append('            except OSError:')
+    out.append('                print(f"Iter {i} | IOCTL 0x{e[\'code\']:08X} | in_len={len(buf)} | out_len={out_sz}")')
+    out.append('                ioctl(h, e["code"], buf, out_sz)')
+    out.append('            except OSError as ex:')
+    out.append('                print(f"[!] IOCTL 0x{e[\'code\']:08X} failed: {ex}")')
     out.append('                pass')
+    out.append('    print("[+] Fuzz done.")')
+    out.append('')
+    out.append('def probe_all(h):')
+    out.append('    print(f"[>] Probing {len(IOCTLS)} IOCTLs with zero-filled buffer (sanity sweep)...")')
+    out.append('    hits = 0')
+    out.append('    for e in IOCTLS:')
+    out.append('        try:')
+    out.append('            ok, data, br = ioctl(h, e["code"], b"\\x00" * e["in_size"], e["out_size"])')
+    out.append('        except OSError as ex:')
+    out.append('            print(f"  [{e[\'idx\']:3d}] 0x{e[\'code\']:08X} EXC {ex}")')
+    out.append('            continue')
+    out.append('        err = ctypes.get_last_error() if not ok else 0')
+    out.append('        marker = "OK " if ok else "ERR"')
+    out.append('        if ok: hits += 1')
+    out.append('        print(f"  [{e[\'idx\']:3d}] 0x{e[\'code\']:08X} {e[\'method\']:18s} {marker} br={br:<5d} winerr={err}")')
+    out.append('    print(f"[+] Probe done. {hits}/{len(IOCTLS)} returned success.")')
+    out.append('')
+    out.append('def spawn_cmd():')
+    out.append('    print("[+] Spawning cmd.exe...")')
+    out.append('    os.system("cmd.exe")')
     out.append('')
     out.append('def main():')
-    out.append('    if len(sys.argv) < 2:')
-    out.append('        print("Usage: poc.py <index> | poc.py fuzz [iters]")')
-    out.append('        for e in IOCTLS:')
-    out.append('            print(f"  {e[\'idx\']:3d} -> 0x{e[\'code\']:08X} {e[\'method\']} tags={e[\'tags\']}")')
-    out.append('        return')
-    out.append('    h = open_device()')
-    out.append('    if sys.argv[1] == "fuzz":')
-    out.append('        n = int(sys.argv[2]) if len(sys.argv) > 2 else 1000')
-    out.append('        fuzz(h, n)')
-    out.append('        return')
-    out.append('    trigger(h, int(sys.argv[1]))')
+    out.append('    print(f"[*] Target device: {DEVICE_PATH.decode()}")')
+    out.append('    print(f"[*] Loaded {len(IOCTLS)} IOCTLs:")')
+    out.append('    for e in IOCTLS:')
+    out.append('        print(f"      {e[\'idx\']:3d} -> 0x{e[\'code\']:08X} {e[\'method\']:18s} tags={e[\'tags\']}")')
+    out.append('    print()')
+    out.append('    print("Usage: poc.py            (default: probe all once)")')
+    out.append('    print("       poc.py <index>   (trigger one)")')
+    out.append('    print("       poc.py fuzz [iters]")')
+    out.append('    print()')
+    out.append('    try:')
+    out.append('        h = open_device()')
+    out.append('    except OSError as e:')
+    out.append('        print(f"[!] {e}")')
+    out.append('        print("    Driver not loaded, wrong device name, or insufficient privileges (try elevated).")')
+    out.append('        _pause()')
+    out.append('        return 1')
+    out.append('    try:')
+    out.append('        if len(sys.argv) < 2:')
+    out.append('            probe_all(h)')
+    out.append('        elif sys.argv[1] in ("shell", "cmd"):')
+    out.append('            spawn_cmd()')
+    out.append('        elif sys.argv[1] == "fuzz":')
+    out.append('            n = int(sys.argv[2]) if len(sys.argv) > 2 else 1000')
+    out.append('            print(f"[>] Fuzzing {n} iterations across {len(IOCTLS)} IOCTLs...")')
+    out.append('            fuzz(h, n)')
+    out.append('            print("[+] Fuzz done.")')
+    out.append('        else:')
+    out.append('            trigger(h, int(sys.argv[1]))')
+    out.append('    except Exception as e:')
+    out.append('        import traceback')
+    out.append('        traceback.print_exc()')
+    out.append('        print(f"[!] {e}")')
+    out.append('    _pause()')
+    out.append('    return 0')
     out.append('')
     out.append('if __name__ == "__main__":')
-    out.append('    main()')
+    out.append('    sys.exit(main() or 0)')
     return "\n".join(out) + "\n"
 
 
@@ -332,8 +527,8 @@ def generate_poc(bv: BinaryView):
             if code in seen:
                 continue
             seen.add(code)
-            text = _deep_text(bv, instrs, max_depth=1)
-            tags = _classify(text)
+            text = _deep_text(bv, instrs, max_depth=3)
+            tags = _classify(text, bv=bv, instrs=instrs)
             d = _ctl_decode(code)
             method = METHOD_MAP.get(d['method'], str(d['method']))
             in_sz, out_sz = _guess_sizes(text, method)

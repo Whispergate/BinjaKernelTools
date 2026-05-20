@@ -39,6 +39,10 @@ from .win_vuln_finder import (
 )
 
 
+_MAX_DEPTH = 3
+_MAX_PER_LEVEL = 16
+
+
 def _txt(instrs, bv, deep=True):
     parts = []
     callees = set()
@@ -46,15 +50,185 @@ def _txt(instrs, bv, deep=True):
         _walk_collect_text(ins, parts)
         _walk_collect_calls(ins, callees)
     t = "\n".join(parts)
-    if deep:
-        for c in callees:
+    if not deep:
+        return t, callees
+    seen = set()
+    frontier = list(callees)
+    depth = 0
+    while frontier and depth < _MAX_DEPTH:
+        nxt = []
+        count = 0
+        for c in frontier:
+            if count >= _MAX_PER_LEVEL:
+                break
+            if c in seen:
+                continue
+            seen.add(c)
+            count += 1
             f = bv.get_function_at(c)
-            if f:
-                try:
-                    t += "\n" + get_hlil_text(f)
-                except Exception:
-                    pass
+            if not f:
+                continue
+            try:
+                t += "\n; --- " + f.name + " ---\n" + get_hlil_text(f)
+            except Exception:
+                continue
+            try:
+                hlil = f.hlil
+                if hlil:
+                    sub = set()
+                    for block in hlil:
+                        for instr in block:
+                            _walk_collect_calls(instr, sub)
+                    nxt.extend(sub - seen)
+            except Exception:
+                pass
+        frontier = nxt
+        depth += 1
     return t, callees
+
+
+_NAME_CLASS_HINTS = {
+    # HEVD memory corruption
+    'bufferoverflowstack':         'StackOverflow',
+    'bufferoverflownonpagedpool':  'PoolOverflow',
+    'bufferoverflowpagedpool':     'PoolOverflow',
+    'stackoverflow':               'StackOverflow',
+    'heapoverflow':                'PoolOverflow',
+    'pooloverflow':                'PoolOverflow',
+    'writenull':                   'NullPointerDereference',
+    'nullpointer':                 'NullPointerDereference',
+    'nullderef':                   'NullPointerDereference',
+    'uninitializedmemorystack':    'UninitializedStackVariable',
+    'uninitializedmemorypaged':    'UninitializedHeapVariable',
+    'uninitializedmemory':         'UninitializedHeapVariable',
+    'uninit':                      'UninitializedHeapVariable',
+    'memorydisclosure':            'MemoryDisclosure',
+    'infoleak':                    'MemoryDisclosure',
+    'integeroverflow':             'IntegerOverflow',
+    'typeconfusion':               'TypeConfusion',
+    'fakeobject':                  'TypeConfusion',
+    'uafobject':                   'UseAfterFree',
+    'useafterfree':                'UseAfterFree',
+    'doublefree':                  'UseAfterFree',
+    'doublefetch':                 'DoubleFetch',
+    'racecondition':               'RaceCondition',
+    'insecurekernelfileaccess':    'InsecureKernelResourceAccess',
+    # arbitrary R/W
+    'arbitrarywrite':              'ArbitraryOverwrite',
+    'arbitraryread':               'MemoryDisclosure',
+    'arbitraryincrement':          'ArbitraryOverwrite',
+    'arbitraryreadwrite':          'ArbitraryOverwrite',
+    'arbwrite':                    'ArbitraryOverwrite',
+    'arbread':                     'MemoryDisclosure',
+    'readkernel':                  'MemoryDisclosure',
+    'writekernel':                 'ArbitraryOverwrite',
+    'readvirtual':                 'MemoryDisclosure',
+    'writevirtual':                'ArbitraryOverwrite',
+    'readmemory':                  'MemoryDisclosure',
+    'writememory':                 'ArbitraryOverwrite',
+    'readprocessmemory':           'MemoryDisclosure',
+    'writeprocessmemory':          'ArbitraryOverwrite',
+    # privileged intrinsics
+    'rdmsr':                       'MSRReadWrite',
+    'wrmsr':                       'MSRReadWrite',
+    'readmsr':                     'MSRReadWrite',
+    'writemsr':                    'MSRReadWrite',
+    'msrread':                     'MSRReadWrite',
+    'msrwrite':                    'MSRReadWrite',
+    'readioport':                  'PortIO',
+    'writeioport':                 'PortIO',
+    'readport':                    'PortIO',
+    'writeport':                   'PortIO',
+    'inport':                      'PortIO',
+    'outport':                     'PortIO',
+    'readphysical':                'PhysicalMemoryMap',
+    'writephysical':               'PhysicalMemoryMap',
+    'mapphysical':                 'PhysicalMemoryMap',
+    'physmem':                     'PhysicalMemoryMap',
+    'physicalmemory':              'PhysicalMemoryMap',
+    'mapmemory':                   'PhysicalMemoryMap',
+    'mapio':                       'PhysicalMemoryMap',
+    'pciconfig':                   'PciConfigAccess',
+    'readpci':                     'PciConfigAccess',
+    'writepci':                    'PciConfigAccess',
+    'readcr':                      'ControlRegisterAccess',
+    'writecr':                     'ControlRegisterAccess',
+    'readdr':                      'ControlRegisterAccess',
+    'writedr':                     'ControlRegisterAccess',
+    'gdt':                         'ControlRegisterAccess',
+    'idt':                         'ControlRegisterAccess',
+    # ring-0 exec
+    'shellcode':                   'Ring0Exec',
+    'execpayload':                 'Ring0Exec',
+    'kernelexec':                  'Ring0Exec',
+    'callkernel':                  'Ring0Exec',
+    # process / token tampering
+    'terminateprocess':            'ProcessTampering',
+    'killprocess':                 'ProcessTampering',
+    'suspendprocess':              'ProcessTampering',
+    'protectprocess':              'ProcessTampering',
+    'unprotectprocess':            'ProcessTampering',
+    'stealtoken':                  'TokenManipulation',
+    'swaptoken':                   'TokenManipulation',
+    'elevatetoken':                'TokenManipulation',
+    'tokenswap':                   'TokenManipulation',
+    # callback / ETW / SSDT
+    'disablecallback':             'CallbackTampering',
+    'removecallback':              'CallbackTampering',
+    'unregistercallback':          'CallbackTampering',
+    'patchetw':                    'EtwTampering',
+    'disableetw':                  'EtwTampering',
+    'ssdt':                        'SsdtTampering',
+    'hookssdt':                    'SsdtTampering',
+    'patchssdt':                   'SsdtTampering',
+    # file / driver
+    'kernelfileread':              'InsecureKernelResourceAccess',
+    'kernelfilewrite':             'InsecureKernelResourceAccess',
+    'kernelregistry':              'InsecureKernelResourceAccess',
+    'loaddriver':                  'DriverLoadPrimitive',
+    'mapdriver':                   'DriverLoadPrimitive',
+    'opensection':                 'InsecureKernelResourceAccess',
+    'mapsection':                  'InsecureKernelResourceAccess',
+}
+
+_SKIP_PREFIX = ('sub_', 'nullsub_', 'j_')
+
+
+def _name_hint_classes(bv, callees):
+    hits = set()
+    seen = set()
+    frontier = list(callees)
+    depth = 0
+    while frontier and depth < _MAX_DEPTH:
+        nxt = []
+        for c in frontier:
+            if c in seen:
+                continue
+            seen.add(c)
+            f = bv.get_function_at(c)
+            if not f:
+                continue
+            nm = f.name
+            if not nm or nm.startswith(_SKIP_PREFIX):
+                pass
+            else:
+                nl = nm.lower().replace('_', '').replace('-', '')
+                for needle, cls in _NAME_CLASS_HINTS.items():
+                    if needle in nl:
+                        hits.add(cls)
+            try:
+                hlil = f.hlil
+                if hlil:
+                    sub = set()
+                    for block in hlil:
+                        for instr in block:
+                            _walk_collect_calls(instr, sub)
+                    nxt.extend(sub - seen)
+            except Exception:
+                pass
+        frontier = nxt
+        depth += 1
+    return hits
 
 
 def _stack_overflow(t):
@@ -158,6 +332,27 @@ def _gdi_confusion(t):
     return 'EngAllocMem' in t or 'EngCreateBitmap' in t or 'PALOBJ' in t
 
 
+def _msr_rw(t):
+    return '__rdmsr' in t or '__wrmsr' in t
+
+
+def _port_io(t):
+    return '__in_' in t or '__out_' in t or 'READ_PORT_' in t or 'WRITE_PORT_' in t
+
+
+def _phys_map(t):
+    return ('MmMapIoSpace' in t or 'MmGetPhysicalAddress' in t or
+            'MmCopyMemory' in t or '\\Device\\PhysicalMemory' in t)
+
+
+def _cr_access(t):
+    return '__readcr' in t or '__writecr' in t or '__readdr' in t or '__writedr' in t
+
+
+def _ring0_exec(t):
+    return bool(re.search(r'\(\s*\*\s*\(\s*\w+\s*\*\s*\)\s*SystemBuffer\s*\)\s*\(', t))
+
+
 _CLASSES = [
     ('StackOverflow',                _stack_overflow),
     ('StackOverflowGS',              _stack_gs),
@@ -175,6 +370,11 @@ _CLASSES = [
     ('MemoryDisclosure',             _mem_disclosure),
     ('RaceCondition',                _race),
     ('GdiBitmapPolymorphism',        _gdi_confusion),
+    ('MSRReadWrite',                 _msr_rw),
+    ('PortIO',                       _port_io),
+    ('PhysicalMemoryMap',            _phys_map),
+    ('ControlRegisterAccess',        _cr_access),
+    ('Ring0Exec',                    _ring0_exec),
 ]
 
 
@@ -207,12 +407,13 @@ def classify_hevd(bv: BinaryView):
             by_code.setdefault(code, []).extend(instrs)
         for code, instrs in sorted(by_code.items()):
             t, callees = _txt(instrs, bv)
-            hits = [cls for cls, det in _CLASSES if _safe(det, t)]
+            hits = set(cls for cls, det in _CLASSES if _safe(det, t))
+            hits |= _name_hint_classes(bv, callees)
             for h in hits:
-                counts[h] += 1
+                counts[h] = counts.get(h, 0) + 1
             d = _ctl_decode(code)
             method = METHOD_MAP.get(d['method'], str(d['method']))
-            label = ", ".join(hits) if hits else "(no class matched)"
+            label = ", ".join(sorted(hits)) if hits else "(no class matched)"
             emit("    IOCTL 0x{:08X} ({}): {}".format(code, method, label))
         emit("")
 

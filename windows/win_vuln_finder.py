@@ -520,28 +520,199 @@ def _walk_collect_text(instr, parts):
         pass
 
 
+_MAX_CLASSIFY_DEPTH = 3
+_MAX_CALLEES_PER_LEVEL = 12
+
+
+def _walk_callees_recursive(bv, start_addr, depth, visited):
+    """Yield (callee_func, name_chain) pairs up to depth levels deep."""
+    if depth <= 0 or start_addr in visited:
+        return
+    visited.add(start_addr)
+    f = bv.get_function_at(start_addr)
+    if not f:
+        return
+    try:
+        hlil = f.hlil
+        if not hlil:
+            return
+    except Exception:
+        return
+    sub_callees = set()
+    try:
+        for block in hlil:
+            for instr in block:
+                _walk_collect_calls(instr, sub_callees)
+    except Exception:
+        return
+    count = 0
+    for caddr in sub_callees:
+        if count >= _MAX_CALLEES_PER_LEVEL:
+            break
+        count += 1
+        sub_f = bv.get_function_at(caddr)
+        if sub_f:
+            yield sub_f
+        yield from _walk_callees_recursive(bv, caddr, depth - 1, visited)
+
+
 def _classify_branch_vulns(bv, instrs):
-    """Given list of HLIL instructions forming a handler branch, return vuln labels."""
+    """Given list of HLIL instructions forming a handler branch, return vuln labels.
+
+    Walks call graph up to _MAX_CLASSIFY_DEPTH deep so wrappers like
+    HEVD's Handler -> Trigger -> primitive chain are caught.
+    """
     text_parts = []
-    callee_starts = set()
+    direct_callees = set()
     for instr in instrs:
         _walk_collect_text(instr, text_parts)
-        _walk_collect_calls(instr, callee_starts)
+        _walk_collect_calls(instr, direct_callees)
     branch_text = "\n".join(text_parts)
     vulns = _scan_text_for_vulns(branch_text)
-    # Inline check failed - look one call-level deeper into branch callees.
-    for caddr in callee_starts:
+
+    visited = set()
+    for caddr in direct_callees:
+        for sub_f in _walk_callees_recursive(bv, caddr, _MAX_CLASSIFY_DEPTH, visited):
+            try:
+                ctext = get_hlil_text(sub_f)
+            except Exception:
+                continue
+            for v in _scan_text_for_vulns(ctext):
+                vulns.add("{} (via {})".format(v, sub_f.name))
+
+    name_hint_vulns = _scan_callee_names_for_vulns(bv, direct_callees, visited)
+    vulns |= name_hint_vulns
+    return vulns, direct_callees
+
+
+# HEVD-style + common kernel-vuln name patterns -> primitive label.
+# Matched against function names anywhere in the call chain.
+# Generic substring -> primitive label. Covers HEVD plus broad driver-naming
+# conventions seen across BYOVD / signed-driver corpora.
+_NAME_HINTS = {
+    'bufferoverflowstack':        'Stack BoF (name)',
+    'bufferoverflownonpagedpool': 'Pool BoF (name)',
+    'bufferoverflowpagedpool':    'Pool BoF (name)',
+    'stackoverflow':              'Stack BoF (name)',
+    'heapoverflow':               'Heap/Pool BoF (name)',
+    'pooloverflow':               'Pool BoF (name)',
+    'integeroverflow':            'Integer Overflow (name)',
+    'arbitrarywrite':             'Arbitrary Write (name)',
+    'arbitraryread':              'Arbitrary Read (name)',
+    'arbitraryincrement':         'Arbitrary Increment (name)',
+    'arbitraryreadwrite':         'Arb R/W primitive (name)',
+    'arbwrite':                   'Arbitrary Write (name)',
+    'arbread':                    'Arbitrary Read (name)',
+    'readkernel':                 'Arbitrary Kernel Read (name)',
+    'writekernel':                'Arbitrary Kernel Write (name)',
+    'readvirtual':                'Virtual Mem Read (name)',
+    'writevirtual':               'Virtual Mem Write (name)',
+    'readmemory':                 'Memory Read (name)',
+    'writememory':                'Memory Write (name)',
+    'readprocessmemory':          'Process Mem Read (name)',
+    'writeprocessmemory':         'Process Mem Write (name)',
+    'writenull':                  'Write to NULL (name)',
+    'nullpointer':                'NULL Deref (name)',
+    'nullderef':                  'NULL Deref (name)',
+    'uninitialized':              'Uninitialized Mem (name)',
+    'uninit':                     'Uninitialized Mem (name)',
+    'memorydisclosure':           'Memory Disclosure (name)',
+    'infoleak':                   'Info Leak (name)',
+    'typeconfusion':              'Type Confusion (name)',
+    'uafobject':                  'Use-After-Free (name)',
+    'useafterfree':               'Use-After-Free (name)',
+    'doublefree':                 'Double Free (name)',
+    'doublefetch':                'Double-Fetch (name)',
+    'racecondition':              'Race Condition (name)',
+    'insecurekernelfileaccess':   'Insecure File Access (name)',
+    'fakeobject':                 'Fake Object / Type Confusion (name)',
+    # privileged-intrinsic primitives
+    'rdmsr':                      'MSR Read (name)',
+    'wrmsr':                      'MSR Write (name)',
+    'readmsr':                    'MSR Read (name)',
+    'writemsr':                   'MSR Write (name)',
+    'msrread':                    'MSR Read (name)',
+    'msrwrite':                   'MSR Write (name)',
+    'readioport':                 'Port IO Read (name)',
+    'writeioport':                'Port IO Write (name)',
+    'readport':                   'Port IO Read (name)',
+    'writeport':                  'Port IO Write (name)',
+    'inport':                     'Port IN (name)',
+    'outport':                    'Port OUT (name)',
+    'readphysical':               'Phys Mem Read (name)',
+    'writephysical':              'Phys Mem Write (name)',
+    'mapphysical':                'Phys Mem Map (name)',
+    'physmem':                    'Phys Mem Access (name)',
+    'physicalmemory':             'Phys Mem Access (name)',
+    'mapmemory':                  'Memory Map (name)',
+    'mapio':                      'IO Space Map (name)',
+    'pciconfig':                  'PCI Config (name)',
+    'readpci':                    'PCI Read (name)',
+    'writepci':                   'PCI Write (name)',
+    'readcr':                     'CRx Read (name)',
+    'writecr':                    'CRx Write (name)',
+    'readdr':                     'DRx Read (name)',
+    'writedr':                    'DRx Write (name)',
+    'gdt':                        'GDT Access (name)',
+    'idt':                        'IDT Access (name)',
+    # ring-0 exec / shellcode
+    'shellcode':                  'Ring-0 Shellcode (name)',
+    'execpayload':                'Ring-0 Exec (name)',
+    'kernelexec':                 'Ring-0 Exec (name)',
+    'callkernel':                 'Ring-0 Exec (name)',
+    # process / token tampering
+    'terminateprocess':           'Process Kill (name)',
+    'killprocess':                'Process Kill (name)',
+    'suspendprocess':             'Process Suspend (name)',
+    'protectprocess':             'Process Protection (name)',
+    'unprotectprocess':           'Process Protection (name)',
+    'stealtoken':                 'Token Steal (name)',
+    'swaptoken':                  'Token Swap (name)',
+    'elevatetoken':               'Token Elevation (name)',
+    'tokenswap':                  'Token Swap (name)',
+    # callback / ETW / SSDT
+    'disablecallback':            'Callback Removal (name)',
+    'removecallback':             'Callback Removal (name)',
+    'unregistercallback':         'Callback Removal (name)',
+    'patchetw':                   'ETW Tampering (name)',
+    'disableetw':                 'ETW Tampering (name)',
+    'ssdt':                       'SSDT Tampering (name)',
+    'hookssdt':                   'SSDT Hook (name)',
+    'patchssdt':                  'SSDT Hook (name)',
+    # file / registry
+    'kernelfileread':             'Kernel File Access (name)',
+    'kernelfilewrite':            'Kernel File Access (name)',
+    'kernelregistry':             'Kernel Registry Access (name)',
+    # driver / section
+    'loaddriver':                 'Driver Load Primitive (name)',
+    'mapdriver':                  'Driver Map Primitive (name)',
+    'opensection':                'Section Open (name)',
+    'mapsection':                 'Section Map (name)',
+}
+
+# Don't match on stub names that carry no info
+_NAME_HINT_SKIP_PREFIX = ('sub_', 'nullsub_', 'j_')
+
+
+def _scan_callee_names_for_vulns(bv, direct_callees, visited_extra):
+    """Name-pattern fallback - HEVD names its handlers literally after the bug class."""
+    hits = set()
+    all_names = set()
+    visited = set(visited_extra)
+    for caddr in direct_callees:
         f = bv.get_function_at(caddr)
-        if not f:
+        if f:
+            all_names.add(f.name)
+        for sub_f in _walk_callees_recursive(bv, caddr, _MAX_CLASSIFY_DEPTH, visited):
+            all_names.add(sub_f.name)
+    for nm in all_names:
+        if not nm or nm.startswith(_NAME_HINT_SKIP_PREFIX):
             continue
-        try:
-            ctext = get_hlil_text(f)
-        except Exception:
-            ctext = ''
-        sub_vulns = _scan_text_for_vulns(ctext)
-        for v in sub_vulns:
-            vulns.add("{} (via {})".format(v, f.name))
-    return vulns, callee_starts
+        nl = nm.lower().replace('_', '').replace('-', '')
+        for needle, label in _NAME_HINTS.items():
+            if needle in nl:
+                hits.add("{} via {}".format(label, nm))
+    return hits
 
 
 def _ioctl_branches_for_dispatcher(dispatcher):
@@ -642,7 +813,7 @@ def _resolve_callee_name(bv, addr):
     sym = bv.get_symbol_at(addr)
     if sym and sym.name:
         return sym.name
-    # Try data symbol — import thunk jumps to data ref of the IAT entry
+    # Try data symbol - import thunk jumps to data ref of the IAT entry
     try:
         for ref in bv.get_data_refs_from(addr):
             ds = bv.get_symbol_at(ref)

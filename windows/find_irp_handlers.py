@@ -128,7 +128,7 @@ def _find_irp_assignments(bv: BinaryView):
         r'\*\s*\(.*?\+\s*(0x[0-9a-fA-F]+)\s*\)\s*=\s*(?:&\s*)?([A-Za-z_?@][A-Za-z0-9_?@]*)',
         re.IGNORECASE
     )
-    # (b) named MajorFunction[N] field — BN shows this when PDB types are resolved
+    # (b) named MajorFunction[N] field - BN shows this when PDB types are resolved
     named_pat = re.compile(
         r'MajorFunction\[(?:0x)?([0-9a-fA-F]+)\]\s*=\s*(?:&\s*)?([A-Za-z_?@][A-Za-z0-9_?@]*)',
         re.IGNORECASE
@@ -143,7 +143,7 @@ def _find_irp_assignments(bv: BinaryView):
         syms = bv.get_symbols_by_name(name)
         if syms:
             return bv.get_function_at(syms[0].address)
-        # demangled name lookup — BN may show short name in HLIL
+        # demangled name lookup - BN may show short name in HLIL
         for f in bv.functions:
             if f.name == name or getattr(f.symbol, 'short_name', None) == name:
                 return f
@@ -163,7 +163,7 @@ def _find_irp_assignments(bv: BinaryView):
                     result.setdefault(irp_idx, []).append((handler, func.name))
             except Exception:
                 pass
-        # pattern (b): MajorFunction[N] — N is decimal index in the HLIL text
+        # pattern (b): MajorFunction[N] - N is decimal index in the HLIL text
         for m in named_pat.finditer(dt):
             try:
                 irp_idx = int(m.group(1))   # always decimal in BN HLIL named-field form
@@ -195,7 +195,7 @@ def _detect_wdf(bv):
 def _find_wdf_callbacks(bv):
     """
     Scan WdfIoQueueCreate callers for function pointer assignments.
-    WDF_IO_QUEUE_CONFIG stores EvtIo* callbacks — find them by:
+    WDF_IO_QUEUE_CONFIG stores EvtIo* callbacks - find them by:
       1. Named function lookup (if BN resolved symbol names)
       2. Scanning function pointer stores in callers of WdfIoQueueCreate
     Returns list of (irp_idx_or_None, handler_func, note)
@@ -302,7 +302,7 @@ def find_irp_handlers(bv: BinaryView):
     if not irp_map:
         log_warn("[-] No MajorFunction[] assignments found via HLIL pattern.")
         if _detect_wdf(bv):
-            log_info("[*] WDF/KMDF driver detected — MajorFunction[] set by framework internally.")
+            log_info("[*] WDF/KMDF driver detected - MajorFunction[] set by framework internally.")
             log_info("[*] Scanning for WDF queue callbacks (EvtIoDeviceControl etc.)...")
             wdf_cbs = _find_wdf_callbacks(bv)
             if wdf_cbs:

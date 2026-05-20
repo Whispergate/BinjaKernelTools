@@ -61,20 +61,217 @@ def _branch_callees(bv, instrs):
     return starts
 
 
-def _deep_text(bv, instrs, max_depth=1):
-    """Branch text + 1 level deep callees text (catches helper functions)."""
+_MAX_DEEP_CALLEES = 16
+
+
+def _deep_text(bv, instrs, max_depth=3):
+    """Branch text + recursive callee text up to max_depth.
+
+    Catches wrapper chains like HEVD's IrpHandler -> Trigger -> primitive.
+    """
     t = _branch_text(instrs)
-    if max_depth <= 0:
-        return t
-    for caddr in _branch_callees(bv, instrs):
-        f = bv.get_function_at(caddr)
-        if not f:
-            continue
-        try:
-            t += "\n; --- callee " + f.name + " ---\n" + get_hlil_text(f)
-        except Exception:
-            pass
+    seen = set()
+    frontier = list(_branch_callees(bv, instrs))
+    depth = 0
+    while frontier and depth < max_depth:
+        next_frontier = []
+        count = 0
+        for caddr in frontier:
+            if count >= _MAX_DEEP_CALLEES:
+                break
+            if caddr in seen:
+                continue
+            seen.add(caddr)
+            count += 1
+            f = bv.get_function_at(caddr)
+            if not f:
+                continue
+            try:
+                t += "\n; --- callee " + f.name + " ---\n" + get_hlil_text(f)
+            except Exception:
+                continue
+            try:
+                hlil = f.hlil
+                if hlil:
+                    sub = set()
+                    for block in hlil:
+                        for instr in block:
+                            _walk_collect_calls(instr, sub)
+                    next_frontier.extend(sub - seen)
+            except Exception:
+                pass
+        frontier = next_frontier
+        depth += 1
     return t
+
+
+# Generic substring -> (severity, primitive label).
+# Covers HEVD plus broad driver-naming conventions seen across BYOVD corpora.
+# Match is case-insensitive on name with _/- stripped.
+_NAME_PRIM_HINTS = {
+    # HEVD-style (memory corruption)
+    'bufferoverflowstack':        ('HIGH',     'Stack Buffer Overflow (name)'),
+    'bufferoverflownonpagedpool': ('HIGH',     'Pool Buffer Overflow (name)'),
+    'bufferoverflowpagedpool':    ('HIGH',     'Pool Buffer Overflow (name)'),
+    'stackoverflow':              ('HIGH',     'Stack Buffer Overflow (name)'),
+    'heapoverflow':               ('HIGH',     'Heap/Pool Overflow (name)'),
+    'pooloverflow':               ('HIGH',     'Pool Overflow (name)'),
+    'integeroverflow':            ('HIGH',     'Integer Overflow (name)'),
+    'uafobject':                  ('HIGH',     'Use-After-Free (name)'),
+    'useafterfree':               ('HIGH',     'Use-After-Free (name)'),
+    'doublefree':                 ('HIGH',     'Double Free (name)'),
+    'doublefetch':                ('HIGH',     'Double-Fetch TOCTOU (name)'),
+    'racecondition':              ('HIGH',     'Race Condition (name)'),
+    'typeconfusion':              ('HIGH',     'Type Confusion (name)'),
+    'fakeobject':                 ('HIGH',     'Type Confusion / Fake Object (name)'),
+    'uninitializedmemory':        ('MEDIUM',   'Uninitialized Memory Leak (name)'),
+    'uninit':                     ('MEDIUM',   'Uninitialized Memory Leak (name)'),
+    'memorydisclosure':           ('MEDIUM',   'Memory Disclosure (name)'),
+    'infoleak':                   ('MEDIUM',   'Info Leak (name)'),
+    'nullpointer':                ('MEDIUM',   'NULL Pointer Deref (name)'),
+    'nullderef':                  ('MEDIUM',   'NULL Pointer Deref (name)'),
+    'writenull':                  ('HIGH',     'Write to NULL (name)'),
+
+    # Arbitrary R/W primitives (broad conventions)
+    'arbitrarywrite':             ('CRITICAL', 'Write-What-Where (name)'),
+    'arbitraryread':              ('CRITICAL', 'Arbitrary Kernel Read (name)'),
+    'arbitraryreadwrite':         ('CRITICAL', 'Arb R/W Primitive (name)'),
+    'arbitraryincrement':         ('HIGH',     'Arbitrary Increment (name)'),
+    'arbwrite':                   ('CRITICAL', 'Write-What-Where (name)'),
+    'arbread':                    ('CRITICAL', 'Arbitrary Kernel Read (name)'),
+    'readkernel':                 ('CRITICAL', 'Arbitrary Kernel Read (name)'),
+    'writekernel':                ('CRITICAL', 'Arbitrary Kernel Write (name)'),
+    'readvirtual':                ('CRITICAL', 'Virtual Memory Read (name)'),
+    'writevirtual':               ('CRITICAL', 'Virtual Memory Write (name)'),
+    'readmemory':                 ('HIGH',     'Memory Read (name)'),
+    'writememory':                ('HIGH',     'Memory Write (name)'),
+    'readprocessmemory':          ('HIGH',     'Process Memory Read (name)'),
+    'writeprocessmemory':         ('HIGH',     'Process Memory Write (name)'),
+
+    # MSR
+    'rdmsr':                      ('CRITICAL', 'MSR Read (name)'),
+    'wrmsr':                      ('CRITICAL', 'MSR Write (name)'),
+    'readmsr':                    ('CRITICAL', 'MSR Read (name)'),
+    'writemsr':                   ('CRITICAL', 'MSR Write (name)'),
+    'msrread':                    ('CRITICAL', 'MSR Read (name)'),
+    'msrwrite':                   ('CRITICAL', 'MSR Write (name)'),
+
+    # Port IO
+    'readioport':                 ('CRITICAL', 'Port IO Read (name)'),
+    'writeioport':                ('CRITICAL', 'Port IO Write (name)'),
+    'readport':                   ('CRITICAL', 'Port IO Read (name)'),
+    'writeport':                  ('CRITICAL', 'Port IO Write (name)'),
+    'inport':                     ('CRITICAL', 'Port IN (name)'),
+    'outport':                    ('CRITICAL', 'Port OUT (name)'),
+    'ioread':                     ('HIGH',     'IO Read (name)'),
+    'iowrite':                    ('HIGH',     'IO Write (name)'),
+
+    # Physical memory
+    'readphysical':               ('CRITICAL', 'Physical Memory Read (name)'),
+    'writephysical':              ('CRITICAL', 'Physical Memory Write (name)'),
+    'mapphysical':                ('CRITICAL', 'Physical Memory Map (name)'),
+    'physmem':                    ('CRITICAL', 'Physical Memory Access (name)'),
+    'physicalmemory':             ('CRITICAL', 'Physical Memory Access (name)'),
+    'mapmemory':                  ('HIGH',     'Memory Map (name)'),
+    'mapio':                      ('HIGH',     'IO Space Map (name)'),
+
+    # PCI / Hal
+    'pciconfig':                  ('HIGH',     'PCI Config Access (name)'),
+    'readpci':                    ('HIGH',     'PCI Read (name)'),
+    'writepci':                   ('HIGH',     'PCI Write (name)'),
+    'halgetbus':                  ('HIGH',     'PCI Bus Access (name)'),
+    'halsetbus':                  ('HIGH',     'PCI Bus Access (name)'),
+
+    # Control / Debug registers
+    'readcr':                     ('CRITICAL', 'CRx Read (name)'),
+    'writecr':                    ('CRITICAL', 'CRx Write (name)'),
+    'readdr':                     ('HIGH',     'DRx Read (name)'),
+    'writedr':                    ('HIGH',     'DRx Write (name)'),
+    'gdt':                        ('HIGH',     'GDT Access (name)'),
+    'idt':                        ('HIGH',     'IDT Access (name)'),
+
+    # Ring-0 exec / shellcode
+    'shellcode':                  ('CRITICAL', 'Ring-0 Shellcode (name)'),
+    'execpayload':                ('CRITICAL', 'Ring-0 Exec (name)'),
+    'kernelexec':                 ('CRITICAL', 'Ring-0 Exec (name)'),
+    'callkernel':                 ('CRITICAL', 'Ring-0 Exec (name)'),
+
+    # Process / token tampering
+    'terminateprocess':           ('HIGH',     'Process Kill (name)'),
+    'killprocess':                ('HIGH',     'Process Kill (name)'),
+    'suspendprocess':             ('HIGH',     'Process Suspend (name)'),
+    'protectprocess':             ('HIGH',     'Process Protection Toggle (name)'),
+    'unprotectprocess':           ('HIGH',     'Process Protection Toggle (name)'),
+    'stealtoken':                 ('CRITICAL', 'Token Steal (name)'),
+    'swaptoken':                  ('CRITICAL', 'Token Swap (name)'),
+    'elevatetoken':               ('CRITICAL', 'Token Elevation (name)'),
+    'tokenswap':                  ('CRITICAL', 'Token Swap (name)'),
+
+    # Kernel callback / ETW / SSDT tampering
+    'disablecallback':            ('HIGH',     'Callback Removal (name)'),
+    'removecallback':             ('HIGH',     'Callback Removal (name)'),
+    'unregistercallback':         ('HIGH',     'Callback Removal (name)'),
+    'patchetw':                   ('HIGH',     'ETW Tampering (name)'),
+    'disableetw':                 ('HIGH',     'ETW Tampering (name)'),
+    'ssdt':                       ('HIGH',     'SSDT Tampering (name)'),
+    'hookssdt':                   ('HIGH',     'SSDT Hook (name)'),
+    'patchssdt':                  ('HIGH',     'SSDT Hook (name)'),
+
+    # File / registry from kernel ctx
+    'insecurekernelfileaccess':   ('HIGH',     'Insecure File Access (name)'),
+    'kernelfileread':             ('HIGH',     'Kernel File Access (name)'),
+    'kernelfilewrite':            ('HIGH',     'Kernel File Access (name)'),
+    'kernelregistry':             ('HIGH',     'Kernel Registry Access (name)'),
+
+    # Driver load / section
+    'loaddriver':                 ('HIGH',     'Driver Load Primitive (name)'),
+    'mapdriver':                  ('HIGH',     'Driver Map Primitive (name)'),
+    'opensection':                ('HIGH',     'Section Open (name)'),
+    'mapsection':                 ('HIGH',     'Section Map (name)'),
+}
+
+
+def _detect_name_hints(bv, instrs):
+    """Walk callees + match descriptive names. Returns list of (sev,label).
+
+    Skips sub_* / nullsub_* unnamed functions (no info). Strips _/- before match.
+    """
+    hits = []
+    seen = set()
+    frontier = list(_branch_callees(bv, instrs))
+    depth = 0
+    while frontier and depth < 3:
+        next_frontier = []
+        for caddr in frontier:
+            if caddr in seen:
+                continue
+            seen.add(caddr)
+            f = bv.get_function_at(caddr)
+            if not f:
+                continue
+            nm = f.name
+            if not nm or nm.startswith('sub_') or nm.startswith('nullsub_') or nm.startswith('j_'):
+                pass
+            else:
+                nl = nm.lower().replace('_', '').replace('-', '')
+                for needle, sev_label in _NAME_PRIM_HINTS.items():
+                    if needle in nl:
+                        sev, label = sev_label
+                        hits.append((sev, label + ' :: ' + nm))
+                        break
+            try:
+                hlil = f.hlil
+                if hlil:
+                    sub = set()
+                    for block in hlil:
+                        for instr in block:
+                            _walk_collect_calls(instr, sub)
+                    next_frontier.extend(sub - seen)
+            except Exception:
+                pass
+        frontier = next_frontier
+        depth += 1
+    return hits
 
 
 def _has_any(text, needles):
@@ -159,6 +356,35 @@ def _detect_double_fetch(text):
     return len(set(refs)) < len(refs)
 
 
+def _detect_msr_rw(text):
+    return '__rdmsr' in text or '__wrmsr' in text or 'Rdmsr' in text or 'Wrmsr' in text
+
+
+def _detect_port_io(text):
+    return ('__in_' in text or '__out_' in text or
+            'READ_PORT_' in text or 'WRITE_PORT_' in text)
+
+
+def _detect_phys_mem(text):
+    return ('MmMapIoSpace' in text or 'MmMapIoSpaceEx' in text or
+            'MmGetPhysicalAddress' in text or 'MmCopyMemory' in text or
+            '\\Device\\PhysicalMemory' in text)
+
+
+def _detect_cr_access(text):
+    return ('__readcr' in text or '__writecr' in text or
+            '__readdr' in text or '__writedr' in text)
+
+
+def _detect_pci_config(text):
+    return 'HalGetBusData' in text or 'HalSetBusData' in text
+
+
+def _detect_ring0_exec(text):
+    """Capcom-style: user-supplied function pointer called in kernel ctx."""
+    return bool(re.search(r'\(\s*\*\s*\(\s*\w+\s*\*\s*\)\s*SystemBuffer\s*\)\s*\(', text))
+
+
 def _detect_uninit_leak(text):
     """ExAllocatePool (not zero variant) -> memcpy to user without RtlZeroMemory."""
     has_nonzero_alloc = bool(re.search(r'ExAllocatePool(?:WithTag)?\b', text)) and \
@@ -173,6 +399,12 @@ def _detect_uninit_leak(text):
 _DETECTORS = [
     ('Write-What-Where',          'CRITICAL', _detect_write_what_where),
     ('Arbitrary Kernel Read',     'CRITICAL', _detect_arb_read),
+    ('MSR Read/Write Primitive',  'CRITICAL', _detect_msr_rw),
+    ('Port IO Primitive',         'CRITICAL', _detect_port_io),
+    ('Physical Memory Map',       'CRITICAL', _detect_phys_mem),
+    ('Control/Debug Register Access', 'CRITICAL', _detect_cr_access),
+    ('Ring-0 Exec (Capcom-style)','CRITICAL', _detect_ring0_exec),
+    ('PCI Config Space Access',   'HIGH',     _detect_pci_config),
     ('Stack Buffer Overflow',     'HIGH',     _detect_stack_bof),
     ('Pool Buffer Overflow',      'HIGH',     _detect_pool_bof),
     ('NULL Pointer Deref',        'MEDIUM',   _detect_null_deref),
@@ -221,7 +453,7 @@ def find_exploit_primitives(bv: BinaryView):
         for code, instrs, _addr in branches:
             by_code.setdefault(code, []).extend(instrs)
         for code, instrs in by_code.items():
-            text = _deep_text(bv, instrs, max_depth=1)
+            text = _deep_text(bv, instrs, max_depth=3)
             hits = []
             for name, sev, det in _DETECTORS:
                 try:
@@ -232,6 +464,10 @@ def find_exploit_primitives(bv: BinaryView):
             ioring = _detect_ioring(text)
             for n in ioring:
                 hits.append(('HIGH', 'IORING reference: ' + n))
+            for sev, label in _detect_name_hints(bv, instrs):
+                hits.append((sev, label))
+            # Dedup
+            hits = list(dict.fromkeys(hits))
             if hits:
                 d = _ctl_decode(code)
                 method = METHOD_MAP.get(d['method'], str(d['method']))

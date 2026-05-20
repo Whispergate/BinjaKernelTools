@@ -176,6 +176,8 @@ Full static triage for Windows kernel drivers. Saves report to `~/.logs/WinDrive
 - Integer overflow in `ExAllocatePool` sizing from user input without `RtlULong*`
 - Missing `SeSinglePrivilegeCheck` / `SeAccessCheck` before sensitive operations
 - Driver type detection: Standard WDM vs Mini-Filter
+- Recursive call-graph classification (depth 3, ~12 callees/level) - catches HEVD-style `Handler -> Trigger -> Primitive` wrapper chains; each finding tagged `(via <fn>)`
+- Name-hint fallback across call chain. Function names like `TriggerStackOverflow`, `ArbitraryWrite`, `ReadMsr`, `WriteCR4`, `MapPhysicalMemory`, `StealToken`, `DisableEtw`, `RemoveCallback`, `LoadDriver`, `OpenSection` flagged even when HLIL pattern misses
 
 ---
 
@@ -197,6 +199,14 @@ Per-IOCTL detection of arbitrary R/W and exploit primitives. References Connor M
 | NULL Pointer Deref (unchecked alloc result) | MEDIUM |
 | IORING reference (`IoRingCreate`, `NtSubmitIoRing`, ...) | HIGH |
 | METHOD_NEITHER dispatcher with no `ProbeForRead/Write` | CRITICAL |
+| MSR Read/Write Primitive (`__rdmsr` / `__wrmsr` reachable from IOCTL) | CRITICAL |
+| Port IO Primitive (`READ_PORT_*` / `WRITE_PORT_*`, `__in_*` / `__out_*`) | CRITICAL |
+| Physical Memory Map (`MmMapIoSpace[Ex]`, `MmCopyMemory`, `\Device\PhysicalMemory`) | CRITICAL |
+| Control/Debug Register Access (`__readcr*` / `__writecr*` / `__readdr*` / `__writedr*`) | CRITICAL |
+| Ring-0 Exec / Capcom-style (`(*(fn*)SystemBuffer)()` user-pointer call in kernel) | CRITICAL |
+| PCI Config Space Access (`HalGetBusData` / `HalSetBusData`) | HIGH |
+
+Name-hint pass walks IOCTL handler callees (depth 3, dedup, skips `sub_*` / `nullsub_*` / `j_*`) and matches descriptive function names against ~80 BYOVD primitive patterns: `ReadKernel`, `WriteVirtual`, `ArbitraryIncrement`, `TerminateProcess`, `ProtectProcess`, `SwapToken`, `PatchEtw`, `HookSsdt`, `MapDriver`, `MapSection`, etc. Each hit emitted with severity + `:: <fn name>` for triage.
 
 ---
 
@@ -204,6 +214,11 @@ Per-IOCTL detection of arbitrary R/W and exploit primitives. References Connor M
 **`windows/win_hevd_classes.py`**
 
 Classifies each IOCTL handler against the HackSysExtremeVulnerableDriver bug-class taxonomy: StackOverflow, StackOverflowGS, PoolOverflow, UseAfterFree, DoubleFree, TypeConfusion, ArbitraryOverwrite, InsecureKernelResourceAccess, NullPointerDereference, UninitializedStack/Heap, IntegerOverflow, DoubleFetch, MemoryDisclosure, RaceCondition, GdiBitmapPolymorphism.
+
+Extended privileged-primitive classes (BYOVD coverage): **MSRReadWrite**, **PortIO**, **PhysicalMemoryMap**, **ControlRegisterAccess**, **Ring0Exec**, plus name-hint classes **TokenManipulation**, **ProcessTampering**, **CallbackTampering**, **EtwTampering**, **SsdtTampering**, **DriverLoadPrimitive**, **PciConfigAccess**.
+
+- HLIL pattern detectors + recursive callee walk (depth 3, ~16/level)
+- Name-hint pass against ~70 substrings - matches handler names like `TriggerArbitraryWrite`, `MsrWrite64`, `WriteCr4`, `MapPhysicalAddress`, `EnableShellcodeExec`, `UnregisterCallback`, `DisableThreatIntel`
 
 Useful for CTFs, training, and triaging unknown drivers against known exploit classes (ref: p.ost2.fyi).
 
@@ -230,9 +245,16 @@ Emits compilable C user-mode POC + Python `ctypes` harness for each discovered I
 - Output: `~/.logs/WinDriverPOCs/<driver>-poc.c` and `<driver>-poc.py`
 - Auto-detects device path from `\Device\` / `\DosDevices\` strings
 - Per-IOCTL stub with METHOD-aware buffer sizing (BUFFERED / NEITHER / DIRECT)
-- Primitive-aware payload comments (write-what-where layout, arb-read layout, BoF sizing, IORING chain hints)
-- Built-in `fuzz` mode with size variation across all discovered IOCTLs
-- Indexed CLI: `poc.exe <index>` or `poc.exe fuzz [iters]`
+- Primitive-aware payload comments covering ~30 primitive layouts: write-what-where, arb-read, arb-increment, process R/W, MSR R/W, port IO, phys-mem, PCI config, CR/DR access, ring-0 exec (Capcom), token swap, process kill/protect, callback removal, ETW/SSDT tamper, driver load, section map, IORING chain
+- Deep classification (depth-3 callee walk + name hints) so wrapper-style handlers still get tagged
+- CLI verbs:
+  - `poc.exe` (no args) - `probe_all` sanity sweep: send zero buffer to every IOCTL, report success/winerr
+  - `poc.exe list` - print index -> IOCTL + tags
+  - `poc.exe <index>` - trigger single IOCTL
+  - `poc.exe fuzz [iters]` - structured fuzzer (interesting sizes + value patterns mixed with `os.urandom`)
+  - `poc.exe shell` / `cmd` - spawn `cmd.exe` after sending payloads (post-exploit hook)
+- Per-call telemetry: target device banner, IOCTL + in/out sizes per send, detected primitives printed per trigger
+- Python harness: `trigger(h, idx, payload=None, out_size=None)` accepts custom bytes and sizes; structured exception printing + `pause_exit` so double-click runs don't vanish
 
 ---
 
