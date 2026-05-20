@@ -179,6 +179,63 @@ Full static triage for Windows kernel drivers. Saves report to `~/.logs/WinDrive
 
 ---
 
+#### Exploit Primitive Finder
+**`windows/win_primitives.py`**
+
+Per-IOCTL detection of arbitrary R/W and exploit primitives. References Connor McGarr, knifecoat IORING, windows-internals.com, whiteknightlabs.
+
+| Primitive | Severity |
+|---|---|
+| Write-What-Where (user-controlled dst + value) | CRITICAL |
+| Arbitrary Kernel Read (`memcpy(out, *user_ptr, len)`) | CRITICAL |
+| Token-Swap Primitive (`PsLookupProcessByProcessId` + Token offset 0x4b8/0x358) | CRITICAL |
+| Stack Buffer Overflow (user-len `memcpy` to `var_*`) | HIGH |
+| Pool Buffer Overflow (`ExAllocatePool` + user-len copy) | HIGH |
+| Type Confusion (`ObReferenceObjectByHandle` ObjectType=NULL) | HIGH |
+| Double-Fetch TOCTOU (same user ptr deref 2+ times no Probe) | HIGH |
+| Uninitialized Pool Leak (non-zero alloc -> user, no `RtlZeroMemory`) | MEDIUM |
+| NULL Pointer Deref (unchecked alloc result) | MEDIUM |
+| IORING reference (`IoRingCreate`, `NtSubmitIoRing`, ...) | HIGH |
+| METHOD_NEITHER dispatcher with no `ProbeForRead/Write` | CRITICAL |
+
+---
+
+#### HEVD Vulnerability Classifier
+**`windows/win_hevd_classes.py`**
+
+Classifies each IOCTL handler against the HackSysExtremeVulnerableDriver bug-class taxonomy: StackOverflow, StackOverflowGS, PoolOverflow, UseAfterFree, DoubleFree, TypeConfusion, ArbitraryOverwrite, InsecureKernelResourceAccess, NullPointerDereference, UninitializedStack/Heap, IntegerOverflow, DoubleFetch, MemoryDisclosure, RaceCondition, GdiBitmapPolymorphism.
+
+Useful for CTFs, training, and triaging unknown drivers against known exploit classes (ref: p.ost2.fyi).
+
+---
+
+#### LOLDrivers Check
+**`windows/win_loldrivers.py`**
+
+Cross-references binary against [loldrivers.io](https://www.loldrivers.io/) dataset:
+
+- SHA256 file-hash lookup against live API (cached 7d at `~/.cache/loldrivers/drivers.json`)
+- Original-filename / on-disk filename match
+- IOCTL-overlap match against embedded curated DB (~25 high-impact entries: RTCore64, gdrv, AsrDrv, dbutil_2_3, Capcom, mhyprot2, WinRing0, iqvw64, Dell PCDoctor, ...)
+- Device-name lexical match to known vulnerable drivers
+- Fallback to embedded mini-DB if network + cache unavailable
+
+---
+
+#### Generate POC (C + Python)
+**`windows/win_poc_gen.py`**
+
+Emits compilable C user-mode POC + Python `ctypes` harness for each discovered IOCTL:
+
+- Output: `~/.logs/WinDriverPOCs/<driver>-poc.c` and `<driver>-poc.py`
+- Auto-detects device path from `\Device\` / `\DosDevices\` strings
+- Per-IOCTL stub with METHOD-aware buffer sizing (BUFFERED / NEITHER / DIRECT)
+- Primitive-aware payload comments (write-what-where layout, arb-read layout, BoF sizing, IORING chain hints)
+- Built-in `fuzz` mode with size variation across all discovered IOCTLs
+- Indexed CLI: `poc.exe <index>` or `poc.exe fuzz [iters]`
+
+---
+
 ## License
 
 BSD 2-Clause - Copyright (c) 2026, Whispergate
