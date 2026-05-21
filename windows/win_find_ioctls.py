@@ -197,6 +197,20 @@ def _find_dispatch_routines(bv: BinaryView):
                 seen.add(func.start)
                 routines.append(func)
 
+    # S5: IOCTL-density scan — catches combined major-function handlers (e.g. WinRing0)
+    # where IRP_MJ_CREATE/CLOSE/DEVICE_CONTROL share one function and S1's text pattern
+    # may miss or produce an empty IOCTL list after extraction.
+    if not routines:
+        for func in bv.functions:
+            if func.start in seen:
+                continue
+            codes = _find_ioctls(func)
+            if len(codes) >= 3:
+                seen.add(func.start)
+                routines.append(func)
+                log_info("[S5] Dispatcher by IOCTL-density ({} codes): {} (0x{:x})".format(
+                    len(codes), func.name, func.start))
+
     return routines
 
 
@@ -222,15 +236,81 @@ def _find_ioctls_in_text(hlil_text):
     return sorted(codes)
 
 
+def _extract_const(node):
+    """Extract an integer constant from an HLIL node (handles Binja 3.x and 4.x)."""
+    if isinstance(node, int):
+        return node
+    try:
+        c = getattr(node, 'constant', None)
+        if isinstance(c, int):
+            return c
+    except Exception:
+        pass
+    try:
+        v = getattr(node, 'value', None)
+        if isinstance(v, int):
+            return v
+        if v is not None:
+            inner = getattr(v, 'value', None)
+            if isinstance(inner, int):
+                return inner
+    except Exception:
+        pass
+    try:
+        return int(node)
+    except Exception:
+        return None
+
+
+def _iter_case_consts(case):
+    """Yield masked integer values for a switch case (Binja 3.x + 4.x)."""
+    vals = getattr(case, 'values', None)
+    if vals is not None:
+        try:
+            for v in vals:
+                c = _extract_const(v)
+                if c is not None:
+                    yield c & 0xFFFFFFFF
+            return
+        except Exception:
+            pass
+    sv = getattr(case, 'value', None)
+    if sv is not None:
+        c = _extract_const(sv)
+        if c is not None:
+            yield c & 0xFFFFFFFF
+
+
 def _collect_switch_cases(instr, codes):
     """Recursively walk one HLIL instruction node, collecting switch case values."""
     try:
-        if instr.operation.name == 'HLIL_SWITCH':
+        opname = instr.operation.name
+        if opname == 'HLIL_SWITCH':
             for case in instr.cases:
-                for v in case.values:
-                    v = int(v) & 0xFFFFFFFF
+                for v in _iter_case_consts(case):
                     if v >= 0x200000 and _plausible_ioctl(v):
                         codes.add(v)
+                # recurse into case body for nested switches
+                body = getattr(case, 'body', None)
+                if body is not None:
+                    if hasattr(body, 'operation'):
+                        _collect_switch_cases(body, codes)
+                    elif hasattr(body, '__iter__') and not isinstance(body, (str, bytes)):
+                        for it in body:
+                            if hasattr(it, 'operation'):
+                                _collect_switch_cases(it, codes)
+        elif opname == 'HLIL_IF':
+            # Explicit branch walk — Binja 4.x omits branches from .operands
+            for attr in ('true', 'false'):
+                branch = getattr(instr, attr, None)
+                if branch is None:
+                    continue
+                if hasattr(branch, 'operation'):
+                    _collect_switch_cases(branch, codes)
+                elif hasattr(branch, '__iter__') and not isinstance(branch, (str, bytes)):
+                    for it in branch:
+                        if hasattr(it, 'operation'):
+                            _collect_switch_cases(it, codes)
         for operand in getattr(instr, 'operands', []):
             if hasattr(operand, 'operation'):
                 _collect_switch_cases(operand, codes)

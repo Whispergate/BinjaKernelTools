@@ -388,11 +388,33 @@ def _iter_case_consts(case):
 
 def _collect_switch_cases(instr, codes):
     try:
-        if instr.operation.name == 'HLIL_SWITCH':
+        opname = instr.operation.name
+        if opname == 'HLIL_SWITCH':
             for case in instr.cases:
                 for v in _iter_case_consts(case):
                     if v >= 0x200000 and _plausible_ioctl(v):
                         codes.add(v)
+                # recurse into case body for nested switches
+                body = getattr(case, 'body', None)
+                if body is not None:
+                    if hasattr(body, 'operation'):
+                        _collect_switch_cases(body, codes)
+                    elif hasattr(body, '__iter__') and not isinstance(body, (str, bytes)):
+                        for it in body:
+                            if hasattr(it, 'operation'):
+                                _collect_switch_cases(it, codes)
+        elif opname == 'HLIL_IF':
+            # Explicit branch walk — Binja 4.x omits branches from .operands
+            for attr in ('true', 'false'):
+                branch = getattr(instr, attr, None)
+                if branch is None:
+                    continue
+                if hasattr(branch, 'operation'):
+                    _collect_switch_cases(branch, codes)
+                elif hasattr(branch, '__iter__') and not isinstance(branch, (str, bytes)):
+                    for it in branch:
+                        if hasattr(it, 'operation'):
+                            _collect_switch_cases(it, codes)
         for operand in getattr(instr, 'operands', []):
             if hasattr(operand, 'operation'):
                 _collect_switch_cases(operand, codes)
@@ -762,6 +784,18 @@ def _ioctl_branches_for_dispatcher(dispatcher):
             pass
         return results
 
+    def _visit_body(branch):
+        """Descend into an if/switch branch regardless of whether it's a block,
+        a list, or a single instruction (handles Binja 3.x and 4.x layouts)."""
+        if branch is None:
+            return
+        if hasattr(branch, 'operation'):
+            _visit(branch)
+        elif hasattr(branch, '__iter__') and not isinstance(branch, (str, bytes)):
+            for it in branch:
+                if hasattr(it, 'operation'):
+                    _visit(it)
+
     def _visit(instr):
         try:
             opname = instr.operation.name
@@ -777,6 +811,8 @@ def _ioctl_branches_for_dispatcher(dispatcher):
                         _all_under(body, body_instrs)
                     for cv in case_consts:
                         out.append((cv, body_instrs, "0x{:x}".format(instr.address)))
+                    # recurse into case bodies so nested dispatchers are found
+                    _visit_body(body)
             elif opname == 'HLIL_IF':
                 consts = _const_from_condition(instr.condition)
                 if consts:
@@ -785,6 +821,14 @@ def _ioctl_branches_for_dispatcher(dispatcher):
                         _all_under(instr.true, body_instrs)
                     for cv in consts:
                         out.append((cv, body_instrs, "0x{:x}".format(instr.address)))
+                # Explicitly recurse into both branches regardless of whether
+                # this if held an IOCTL constant.  Binja 4.x does NOT include
+                # the branch bodies in .operands (only the condition), so the
+                # generic operands-loop below misses them.  Drivers like WinRing0
+                # wrap the entire IOCTL switch inside if(MajorFunction == 0xe).
+                _visit_body(getattr(instr, 'true',  None))
+                _visit_body(getattr(instr, 'false', None))
+            # Generic operands walk covers HLIL_BLOCK, HLIL_WHILE, etc.
             for op in getattr(instr, 'operands', []):
                 if hasattr(op, 'operation'):
                     _visit(op)
